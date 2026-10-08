@@ -28,7 +28,6 @@ export interface HostState {
 
 export interface Config {
   excludePatterns: string[];
-  installMethod: string;
   hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string }>;
 }
 

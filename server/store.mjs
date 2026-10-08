@@ -21,7 +21,6 @@ const DEFAULT_CONFIG = {
   // ssh config 中匹配这些模式的主机不会出现在管理列表
   excludePatterns: ["github.com", "internal-*"],
   // 安装方式：目前仅实现 npm；保留该设置项，避免像旧版一样替用户做决定并改 PATH
-  installMethod: "npm",
   // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string } }
   hostOverrides: {
     "your-host": { prelude: DEFAULT_HOST_PRELUDES["your-host"] }

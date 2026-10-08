@@ -56,9 +56,8 @@ app.get("/api/settings", (req, res) => res.json(loadConfig()));
 
 app.put("/api/settings", (req, res) => {
   const config = loadConfig();
-  const { excludePatterns, installMethod } = req.body ?? {};
+  const { excludePatterns } = req.body ?? {};
   if (Array.isArray(excludePatterns)) config.excludePatterns = excludePatterns.filter((s) => typeof s === "string");
-  if (typeof installMethod === "string") config.installMethod = installMethod;
   saveConfig(config);
   res.json({ ok: true });
 });

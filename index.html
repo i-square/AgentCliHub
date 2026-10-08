@@ -3,6 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // 首帧前应用主题，避免闪烁（与 App.tsx useTheme 逻辑一致）
+      (function () {
+        var m = localStorage.getItem("theme") || "dark";
+        var eff = m === "system" && matchMedia("(prefers-color-scheme: light)").matches ? "light" : (m === "system" ? "dark" : m);
+        document.documentElement.dataset.theme = eff;
+      })();
+    </script>
     <title>CodexHub · CLI 更新管理</title>
   </head>
   <body>

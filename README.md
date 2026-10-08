@@ -9,7 +9,10 @@
 - **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
   - 遇到 `rename ... failed`（EPERM/ENOENT）时，自动删除报错涉及的 npm 全局目录并重试一次（仅限 `npm root -g` 之内的路径，防止误删）
   - 若因 app-server 占用文件导致失败，日志中会提示先重启 app-server
-- **重启 app-server**：结束后端 `codex app-server` 进程；Codex desktop 重连时会自动拉起新版本，更新从而生效
+- **重启 app-server**：结束后端 `codex app-server` 进程；Codex desktop 重连时会自动拉起新版本，更新从而生效。按钮位于 Codex 列（与 Claude Code 无关），支持批量重启
+- **批量更新**：勾选多台主机批量更新，或一键更新全部有新版的主机（自动跳过已最新/未安装）；同一时刻只允许一种工具批量执行（npm 全局目录互斥）
+- **主题切换**：浅色（淡黄科技感）/ 深色 / 跟随系统，localStorage 持久化
+- **稳定布局**：表格列宽固定、版本号等宽字体占位，状态变化不引起按钮位移
 - **实时日志**：任务输出通过 SSE 推送到页面
 - **每主机 prelude**：远程命令前执行的 shell 片段（如 nvm 加载、代理开启），可在页面“编辑”中覆盖
 
@@ -27,6 +30,13 @@ npm start
 ```
 
 打开 http://127.0.0.1:8722 （开发时 http://127.0.0.1:5173）。
+
+## 部署（常驻 + 开机自启）
+
+- [Windows（PM2 + pm2-windows-startup）](docs/deploy-windows.md)
+- [Linux（systemd / PM2 / nohup，Docker 预留）](docs/deploy-linux.md)
+
+PM2 配置见根目录 `ecosystem.config.cjs`，生产部署监听 `0.0.0.0:8123`。
 
 ## 工作原理
 
@@ -46,10 +56,6 @@ export NVM_DIR=/path/to/your/nvm
 source <(curl -sSL https://example.com/setup_proxy.sh) >/dev/null 2>&1 || true
 ```
 
-### 关于安装方式
-
-设置中保留 `installMethod` 选项，默认且当前仅实现 **npm**。旧版桌面端曾强制 standalone 安装并修改 PATH，本重构明确摒弃该行为；standalone 选项目前禁用。
-
 ## 目录结构
 
 ```
@@ -66,7 +72,7 @@ data/         运行时配置与状态快照（不入库）
 
 ## 安全
 
-- 服务默认只绑定 `127.0.0.1`。它能以你的身份在各主机执行命令，**不要**通过 `HOST` 环境变量暴露到局域网/公网。
+- `npm start` 默认只绑定 `127.0.0.1`；PM2 生产部署（`ecosystem.config.cjs`）绑定 `0.0.0.0:8123`。本工具能以你的身份在各主机执行命令，仅在受信内网使用，**切勿暴露公网**（详见部署文档）。
 - SSH 全部走 `~/.ssh/config` 的既有配置与免密登录（`BatchMode=yes`），不存储任何密码。
 
 ## 开发

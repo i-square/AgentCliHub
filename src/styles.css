@@ -1,5 +1,6 @@
+/* ===== 主题变量：默认深色；[data-theme="light"] 淡黄科技感浅色 ===== */
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
   --bg: #0f1115;
   --panel: #171a21;
   --border: #2a2f3a;
@@ -10,6 +11,42 @@
   --yellow: #eab308;
   --red: #ef4444;
   --gray: #6b7280;
+  --hover: rgba(255, 255, 255, 0.03);
+  --input-bg: #0d1015;
+  --log-bg: #0a0c10;
+  --tag-bg: #1f3a5f;
+  --tag-text: #93c5fd;
+  --tag-off-bg: #3a2a2a;
+  --tag-off-text: #fca5a5;
+  --badge-green-bg: rgba(34, 197, 94, 0.15);
+  --badge-yellow-bg: rgba(234, 179, 8, 0.15);
+  --badge-gray-bg: rgba(107, 114, 128, 0.2);
+  --mask-bg: rgba(0, 0, 0, 0.55);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4efdc;
+  --panel: #fcfaf0;
+  --border: #ddd5b8;
+  --text: #2d2b21;
+  --muted: #837b5e;
+  --accent: #2563eb;
+  --green: #15803d;
+  --yellow: #a16207;
+  --red: #b91c1c;
+  --gray: #6b7280;
+  --hover: rgba(0, 0, 0, 0.04);
+  --input-bg: #fffdf4;
+  --log-bg: #f1ebd7;
+  --tag-bg: #dbe7fd;
+  --tag-text: #1d4ed8;
+  --tag-off-bg: #f0d9d9;
+  --tag-off-text: #b91c1c;
+  --badge-green-bg: rgba(21, 128, 61, 0.12);
+  --badge-yellow-bg: rgba(161, 98, 7, 0.12);
+  --badge-gray-bg: rgba(107, 114, 128, 0.15);
+  --mask-bg: rgba(60, 55, 35, 0.4);
 }
 
 * { box-sizing: border-box; }
@@ -19,15 +56,26 @@ body {
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
+  transition: background-color 0.25s, color 0.25s;
 }
 
 .page { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
 .loading { color: var(--muted); }
 
-.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+/* ===== 顶栏 ===== */
+.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
 .topbar h1 { font-size: 22px; margin: 0; }
 .subtitle { font-size: 13px; color: var(--muted); font-weight: normal; margin-left: 10px; }
-.topbar-actions { display: flex; gap: 8px; }
+.topbar-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ===== 主题切换（分段控件） ===== */
+.theme-switch { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.theme-switch button {
+  background: transparent; color: var(--muted); border: none; border-radius: 0;
+  padding: 5px 12px; font-size: 12px;
+}
+.theme-switch button + button { border-left: 1px solid var(--border); }
+.theme-switch button.active { background: var(--accent); color: #fff; }
 
 button {
   background: var(--accent);
@@ -42,36 +90,76 @@ button:hover:not(:disabled) { filter: brightness(1.12); }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
 
-.host-table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
-.host-table th, .host-table td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+input[type="checkbox"]:disabled { cursor: not-allowed; }
+
+/* ===== 批量操作栏 ===== */
+.batchbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 14px; margin-bottom: 10px; font-size: 13px;
+}
+.batchbar .select-all { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.selected-count { color: var(--muted); font-size: 12px; min-width: 7em; }
+.batch-group { display: flex; gap: 6px; align-items: center; }
+.batch-group button { padding: 4px 12px; font-size: 12px; }
+.batch-divider { width: 1px; height: 18px; background: var(--border); }
+.batch-hint { color: var(--muted); font-size: 12px; }
+.batch-spacer { flex: 1; }
+
+/* ===== 主机表格：fixed 布局，列宽固定，杜绝版本号变化引起的抖动 ===== */
+.host-table { width: 100%; table-layout: fixed; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
+.host-table th, .host-table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .host-table th { color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
 .host-table tr.disabled td { opacity: 0.45; }
+.host-table col.c-check { width: 34px; }
+.host-table col.c-host { width: 24%; }
+.host-table col.c-codex { width: 28%; }
+.host-table col.c-claude { width: 24%; }
 
-.host-name { font-weight: 600; display: flex; gap: 6px; align-items: center; }
-.host-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
-.tag { font-size: 11px; background: #1f3a5f; color: #93c5fd; border-radius: 4px; padding: 1px 6px; }
-.tag.off { background: #3a2a2a; color: #fca5a5; }
+.host-name { font-weight: 600; display: flex; gap: 6px; align-items: center; height: 24px; }
+.host-meta {
+  color: var(--muted); font-size: 12px; margin-top: 4px; height: 26px; line-height: 26px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tag { font-size: 11px; background: var(--tag-bg); color: var(--tag-text); border-radius: 4px; padding: 1px 6px; }
+.tag.off { background: var(--tag-off-bg); color: var(--tag-off-text); }
 
-.ver { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
-.ver-current { font-family: Consolas, monospace; font-size: 14px; }
-.ver-latest { color: var(--yellow); font-family: Consolas, monospace; font-size: 13px; }
-.badge { font-size: 11px; border-radius: 4px; padding: 1px 7px; }
-.badge.green { background: rgba(34, 197, 94, 0.15); color: var(--green); }
-.badge.yellow { background: rgba(234, 179, 8, 0.15); color: var(--yellow); }
-.badge.gray { background: rgba(107, 114, 128, 0.2); color: var(--gray); }
+/* 版本区固定两行高度：版本行 + 操作行；版本号等宽字体 + 固定占位宽度 */
+.ver-row { display: flex; align-items: baseline; gap: 8px; height: 24px; }
+.ver-current {
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 14px;
+  display: inline-block; min-width: 9ch;
+}
+.ver-latest {
+  color: var(--yellow); font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+  display: inline-block; min-width: 11ch;
+}
+.ver-actions { display: flex; align-items: center; gap: 8px; height: 26px; margin-top: 4px; }
+.badge {
+  font-size: 11px; border-radius: 4px; padding: 1px 7px;
+  display: inline-block; min-width: 5em; text-align: center;
+}
+.badge.green { background: var(--badge-green-bg); color: var(--green); }
+.badge.yellow { background: var(--badge-yellow-bg); color: var(--yellow); }
+.badge.gray { background: var(--badge-gray-bg); color: var(--gray); }
 .update-btn { padding: 4px 12px; font-size: 12px; }
+.restart-btn { padding: 4px 10px; font-size: 12px; background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.restart-btn:hover:not(:disabled) { color: var(--text); filter: none; border-color: var(--muted); }
 
-.actions { white-space: nowrap; }
-.actions button { margin-right: 6px; margin-bottom: 4px; padding: 4px 10px; font-size: 12px; }
-.running-hint { color: var(--accent); font-size: 12px; }
+.actions-cell .action-row { display: flex; gap: 6px; height: 24px; align-items: center; }
+.actions-cell .hint-row { height: 26px; margin-top: 4px; display: flex; align-items: center; }
+.actions-cell button { padding: 4px 10px; font-size: 12px; }
+.running-hint { color: var(--accent); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* ===== 任务日志 ===== */
 .tasks { margin-top: 28px; }
 .tasks h2 { font-size: 15px; color: var(--muted); }
 .muted { color: var(--muted); }
 .task-list { list-style: none; margin: 0; padding: 0; }
 .task { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; overflow: hidden; }
-.task-head { display: flex; gap: 10px; align-items: center; width: 100%; background: transparent; color: var(--text); border: none; padding: 9px 12px; text-align: left; }
-.task-head:hover { background: rgba(255, 255, 255, 0.03); }
+.task-head { display: flex; gap: 10px; align-items: center; width: 100%; background: transparent; color: var(--text); border: none; padding: 9px 12px; text-align: left; border-radius: 0; }
+.task-head:hover { background: var(--hover); }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dot.running { background: var(--accent); animation: pulse 1.2s infinite; }
 .dot.success { background: var(--green); }
@@ -83,12 +171,13 @@ button.ghost { background: transparent; color: var(--text); border: 1px solid va
 
 .log {
   margin: 0; padding: 12px; max-height: 320px; overflow: auto;
-  background: #0a0c10; border-top: 1px solid var(--border);
+  background: var(--log-bg); border-top: 1px solid var(--border);
   font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; line-height: 1.5;
   white-space: pre-wrap; word-break: break-all;
 }
 
-.modal-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center; justify-content: center; z-index: 10; }
+/* ===== 弹窗 ===== */
+.modal-mask { position: fixed; inset: 0; background: var(--mask-bg); display: flex; align-items: center; justify-content: center; z-index: 10; }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; width: 560px; max-width: 92vw; padding: 18px 20px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .modal-head h3 { margin: 0; font-size: 16px; }
@@ -96,7 +185,7 @@ button.ghost { background: transparent; color: var(--text); border: 1px solid va
 .field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .field span { color: var(--muted); }
 .field input[type="text"], .field input:not([type]), .field textarea, .field select {
-  background: #0d1015; color: var(--text); border: 1px solid var(--border);
+  background: var(--input-bg); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit;
 }
 .field textarea { font-family: Consolas, monospace; resize: vertical; }
