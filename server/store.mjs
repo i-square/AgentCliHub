@@ -7,24 +7,21 @@ const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "d
 const configFile = path.join(dataDir, "config.json");
 const stateFile = path.join(dataDir, "state.json");
 
-export const DEFAULT_HOST_PRELUDES = {
-  // your-host：nvm 不在默认 HOME 下，且 npm 需要代理；proxy_on 定义在其 bashrc 中，
-  // 本质等价于 source 这个 curl 脚本，这里直接使用确定性写法。
-  "your-host": [
-    "export NVM_DIR=/path/to/your/nvm",
-    '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"',
-    "source <(curl -sSL https://example.com/setup_proxy.sh) >/dev/null 2>&1 || true"
-  ].join("\n")
-};
+// 每主机默认 Shell prelude 的扩展点。示例（nvm 不在默认 HOME 且 npm 需代理的主机）：
+// export const DEFAULT_HOST_PRELUDES = {
+//   "your-host": [
+//     "export NVM_DIR=/path/to/your/nvm",
+//     "[ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"",
+//     "source <(curl -sSL https://example.com/setup_proxy.sh) >/dev/null 2>&1 || true"
+//   ].join("\n")
+// };
+export const DEFAULT_HOST_PRELUDES = {};
 
 const DEFAULT_CONFIG = {
   // ssh config 中匹配这些模式的主机不会出现在管理列表
-  excludePatterns: ["github.com", "internal-*"],
-  // 安装方式：目前仅实现 npm；保留该设置项，避免像旧版一样替用户做决定并改 PATH
+  excludePatterns: ["github.com"],
   // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string } }
-  hostOverrides: {
-    "your-host": { prelude: DEFAULT_HOST_PRELUDES["your-host"] }
-  }
+  hostOverrides: {}
 };
 
 function readJson(file, fallback) {

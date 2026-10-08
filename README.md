@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **主机清单自动发现**：本机（Windows / pwsh）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`、`internal-*`）
+- **主机清单自动发现**：本机（Windows / pwsh）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）
 - **状态检查**：各主机 codex / claude 当前版本 + npm registry 最新版本，一眼看出哪台该更新
 - **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
   - 遇到 `rename ... failed`（EPERM/ENOENT）时，自动删除报错涉及的 npm 全局目录并重试一次（仅限 `npm root -g` 之内的路径，防止误删）
@@ -46,9 +46,9 @@ PM2 配置见根目录 `ecosystem.config.cjs`，生产部署监听 `0.0.0.0:8123
 | node/npm 定位 | 系统 PATH | 自动 prepend `~/.nvm/versions/node/*/bin`（最高版本优先），再叠加主机 prelude |
 | 版本检查 | `codex --version` / `claude --version` + `npm view <pkg> version` | 同上（在远程执行，尊重其网络/代理） |
 
-### your-host 的特殊处理
+### 非标准环境与代理
 
-该机器的 nvm 在 `/path/to/your/nvm`（非默认 HOME），且 npm 需要代理。默认 prelude（可在页面编辑覆盖）：
+若某主机 nvm 不在默认 HOME、或 npm 需要代理，可在页面「编辑」中为该主机配置 Shell prelude（远程命令前执行），例如：
 
 ```bash
 export NVM_DIR=/path/to/your/nvm
