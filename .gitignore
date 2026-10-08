@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Runtime data (host state snapshots, user config)
+data/*
+!data/.gitkeep
+
+# Logs and local files
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+
+# Editor
+.vscode/
+.idea/
+
