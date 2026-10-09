@@ -203,7 +203,7 @@ export async function pushCatalog(host, rendered, { targetPath, onData }) {
     `base64 -d > "$tmp"`,
     `mv -f "$tmp" "$t"`,
     `echo "已写入 $t"`,
-    `\\rm -f "$(dirname "$t")/models_cache.json"`,
+    `command rm -f "$(dirname "$t")/models_cache.json"`,
     `echo "已删除 $(dirname "$t")/models_cache.json"`
   ].join("\n");
   const b64 = Buffer.from(rendered, "utf8").toString("base64");
@@ -233,11 +233,20 @@ function parseExitCode(output) {
 }
 
 /** npm rename 失败时报错中的源/目标目录 */
-function parseRenamePaths(output) {
+export function parseRenamePaths(output) {
   if (!/rename/i.test(output)) return [];
   const paths = [];
+  // 格式1：npm error path / dest 分行输出
   for (const re of [/npm (?:error|ERR!) path (.+)$/gim, /npm (?:error|ERR!) dest (.+)$/gim]) {
     for (const m of output.matchAll(re)) paths.push(m[1].trim());
+  }
+  // 格式2：单行带引号 "rename 'A' -> 'B'"（npm 11 ENOTEMPTY/EPERM 常见写法）
+  for (const m of output.matchAll(/rename\s+'([^']+)'\s*->\s*'([^']+)'/gi)) {
+    paths.push(m[1].trim(), m[2].trim());
+  }
+  // 格式3：单行无引号（仅绝对路径，避免误匹配散文文本）
+  for (const m of output.matchAll(/rename\s+((?:[A-Za-z]:[\\/]|\/)[^\s'"]+)\s*->\s*((?:[A-Za-z]:[\\/]|\/)[^\s'"]+)/gi)) {
+    paths.push(m[1].trim(), m[2].trim());
   }
   return [...new Set(paths)];
 }
@@ -260,7 +269,9 @@ async function deletePaths(host, paths, onData) {
     }
   } else {
     const quoted = paths.map(sq).join(" ");
-    await runRemoteBash(host.id, `rm -rf -- ${quoted}`, {
+    // command rm：rm 处于参数位不被 alias 展开，同时绕过同名函数（比 \rm 更强），
+    // 规避主机把 rm 包装成交互式确认脚本（需输入 YES）导致删除卡死
+    await runRemoteBash(host.id, `command rm -rf -- ${quoted}`, {
       onData: (c) => onData(`[cleanup] rm -rf ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
     });
   }
