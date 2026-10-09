@@ -1,4 +1,4 @@
-// CodexHub Web 后端：API + SSE 实时日志 + 静态前端
+// AgentCliHub 后端：API + SSE 实时日志 + 静态前端
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";
@@ -282,5 +282,5 @@ if (fs.existsSync(distDir)) {
 }
 
 app.listen(PORT, HOST, () => {
-  console.log(`CodexHub Web 已启动: http://${HOST}:${PORT}`);
+  console.log(`AgentCliHub 已启动: http://${HOST}:${PORT}`);
 });

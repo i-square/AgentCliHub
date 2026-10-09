@@ -15,17 +15,17 @@ npm run build   # 生成 dist/ 前端产物
 
 系统级服务，开机自启、崩溃自动重启、日志进 journald，无需额外依赖。
 
-创建 `/etc/systemd/system/codexhub-web.service`：
+创建 `/etc/systemd/system/AgentCliHub-web.service`：
 
 ```ini
 [Unit]
-Description=CodexHub Web
+Description=AgentCliHub
 After=network.target
 
 [Service]
 Type=simple
 User=YOUR_USER
-WorkingDirectory=/opt/CodexHub
+WorkingDirectory=/opt/AgentCliHub
 Environment=HOST=0.0.0.0
 Environment=PORT=8123
 Environment=NODE_ENV=production
@@ -41,9 +41,9 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now codexhub-web
-systemctl status codexhub-web        # 查看状态
-journalctl -u codexhub-web -f        # 跟踪日志
+sudo systemctl enable --now AgentCliHub-web
+systemctl status AgentCliHub-web        # 查看状态
+journalctl -u AgentCliHub-web -f        # 跟踪日志
 ```
 
 注意：`ExecStart` 中的 node 路径按实际调整（`which node`）；nvm 安装时路径形如 `/home/USER/.nvm/versions/node/vXX/bin/node`。
@@ -59,7 +59,7 @@ pm2 save                         # 保存进程列表
 pm2 startup                      # 生成自启脚本，按提示复制执行输出的 sudo env ... 命令
 ```
 
-常用命令同 Windows 文档（`pm2 list` / `pm2 logs` / `pm2 restart codexhub-web`）。
+常用命令同 Windows 文档（`pm2 list` / `pm2 logs` / `pm2 restart AgentCliHub-web`）。
 
 ## 方式三：nohup（临时/极简场景）
 

@@ -36,9 +36,9 @@ pm2-startup install
 
 ```powershell
 pm2 list                  # 查看进程状态
-pm2 logs codexhub-web     # 实时日志（落盘文件在 data/logs/）
-pm2 restart codexhub-web  # 重启（代码更新后：npm run build; pm2 restart codexhub-web）
-pm2 stop codexhub-web     # 停止
+pm2 logs AgentCliHub-web     # 实时日志（落盘文件在 data/logs/）
+pm2 restart AgentCliHub-web  # 重启（代码更新后：npm run build; pm2 restart AgentCliHub-web）
+pm2 stop AgentCliHub-web     # 停止
 pm2 monit                 # CPU/内存监控
 ```
 
@@ -46,7 +46,7 @@ pm2 monit                 # CPU/内存监控
 
 ```powershell
 pm2-startup uninstall     # 移除开机项
-pm2 delete codexhub-web   # 移除进程
+pm2 delete AgentCliHub-web   # 移除进程
 pm2 save                  # 同步清空 dump
 npm uninstall -g pm2 pm2-windows-startup
 ```
@@ -56,5 +56,5 @@ npm uninstall -g pm2 pm2-windows-startup
 首次绑定 `0.0.0.0` 时 Windows 可能弹出防火墙提示，勾选"专用网络"即可。若需手动放行：
 
 ```powershell
-New-NetFirewallRule -DisplayName "CodexHub Web 8123" -Direction Inbound -Protocol TCP -LocalPort 8123 -Action Allow -Profile Private
+New-NetFirewallRule -DisplayName "AgentCliHub 8123" -Direction Inbound -Protocol TCP -LocalPort 8123 -Action Allow -Profile Private
 ```

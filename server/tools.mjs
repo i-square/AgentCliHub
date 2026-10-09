@@ -186,7 +186,7 @@ export async function pushCatalog(host, rendered, { targetPath, onData }) {
   if (host.kind === "local") {
     const target = expandHomeLocal(targetPath);
     await fs.promises.mkdir(path.dirname(target), { recursive: true });
-    const tmp = `${target}.codexhub-tmp`;
+    const tmp = `${target}.AgentCliHub-tmp`;
     await fs.promises.writeFile(tmp, rendered, "utf8");
     await fs.promises.rename(tmp, target);
     onData(`已写入 ${target}\n`);
@@ -199,7 +199,7 @@ export async function pushCatalog(host, rendered, { targetPath, onData }) {
     "set -e",
     `t=${remotePathExpr(targetPath)}`,
     `mkdir -p "$(dirname "$t")"`,
-    `tmp="$t.codexhub-$$"`,
+    `tmp="$t.AgentCliHub-$$"`,
     `base64 -d > "$tmp"`,
     `mv -f "$tmp" "$t"`,
     `echo "已写入 $t"`,

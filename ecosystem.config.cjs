@@ -3,7 +3,7 @@
 module.exports = {
   apps: [
     {
-      name: "codexhub-web",
+      name: "AgentCliHub-web",
       script: "server/index.mjs",
       // 相对 PM2 启动时的 cwd 解析；请始终在项目根目录执行 pm2 命令
       cwd: __dirname,

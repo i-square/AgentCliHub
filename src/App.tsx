@@ -192,7 +192,7 @@ export default function App() {
   return (
     <div className="page">
       <header className="topbar">
-        <h1>CodexHub <span className="subtitle">Codex / Claude Code 更新管理</span></h1>
+        <h1>AgentCliHub <span className="subtitle">Codex / Claude Code 更新管理</span></h1>
         <nav className="view-switch" role="group" aria-label="页面切换">
           <button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")}>主机管理</button>
           <button className={view === "catalogs" ? "active" : ""} onClick={() => setView("catalogs")}>模型目录</button>

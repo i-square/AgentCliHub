@@ -145,7 +145,7 @@ export function deleteCatalog(name) {
 /** 从 sourceUrl 下载最新 OAI catalog 并覆盖保存（保存原始文本，补丁在合并时应用） */
 export async function refreshOai(sourceUrl) {
   const res = await fetch(sourceUrl, {
-    headers: { "User-Agent": "codexhub-model-catalog-updater" },
+    headers: { "User-Agent": "AgentCliHub-model-catalog-updater" },
     signal: AbortSignal.timeout(30_000)
   });
   if (!res.ok) throw new Error(`下载失败: HTTP ${res.status}`);
