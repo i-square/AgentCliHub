@@ -21,7 +21,14 @@ const DEFAULT_CONFIG = {
   // ssh config 中匹配这些模式的主机不会出现在管理列表
   excludePatterns: ["github.com"],
   // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string } }
-  hostOverrides: {}
+  hostOverrides: {},
+  // 模型目录：OAI 下载源、推送目标路径、OAI 补丁开关、各 catalog 的优先级分段
+  catalog: {
+    sourceUrl: "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json",
+    targetPath: "~/.codex/models.json",
+    forceResponsesLiteFalse: true,
+    priorities: { oai: [0, 100], glm: [100, 200], kimi: [200, 300], deepseek: [300, 400] }
+  }
 };
 
 function readJson(file, fallback) {
@@ -41,10 +48,16 @@ function writeJson(file, value) {
 
 export function loadConfig() {
   const raw = readJson(configFile, {});
+  const defaults = structuredClone(DEFAULT_CONFIG);
   return {
-    ...structuredClone(DEFAULT_CONFIG),
+    ...defaults,
     ...raw,
-    hostOverrides: { ...structuredClone(DEFAULT_CONFIG.hostOverrides), ...(raw.hostOverrides ?? {}) }
+    hostOverrides: { ...defaults.hostOverrides, ...(raw.hostOverrides ?? {}) },
+    catalog: {
+      ...defaults.catalog,
+      ...(raw.catalog ?? {}),
+      priorities: { ...defaults.catalog.priorities, ...(raw.catalog?.priorities ?? {}) }
+    }
   };
 }
 

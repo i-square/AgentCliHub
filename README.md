@@ -15,6 +15,13 @@
 - **稳定布局**：表格列宽固定、版本号等宽字体占位，状态变化不引起按钮位移
 - **实时日志**：任务输出通过 SSE 推送到页面
 - **每主机 prelude**：远程命令前执行的 shell 片段（如 nvm 加载、代理开启），可在页面“编辑”中覆盖
+- **模型目录（models.json）管理**：集中维护各来源的模型 catalog（`data/catalogs/models.*.json`），合并后一键推送到多台主机
+  - `models.oai.json` 为内置官方 catalog，从 GitHub 源地址在线下载（可在目录页改源地址），合并时强制 `use_responses_lite=false`（可关）
+  - 自定义 catalog（如 kimi / glm / deepseek）在页面用 CodeMirror JSON 编辑器在线编辑、校验、格式化，保存时规范化（按 slug 排序）并留 `.bak` 备份
+  - 各文件按 priority 分段管理（如 oai 0-100、glm 100-200），「重排」可按起点顺次重写编号
+  - 合并预览：模型总数、hash、较上次推送的新增/删除/变化、slug 冲突清单（冲突时 OAI 胜出，与 `update_models_catalog.py` 语义一致）
+  - 推送前自动检测目标机 `config.toml` 的 `model_catalog_json`：未开启或路径不一致的主机禁用推送并悬停提示原因（不强制改写配置）
+  - 推送 = 原子写入目标路径（默认 `~/.codex/models.json`）+ `\rm -f` 删除 `models_cache.json`，可选推送后重启 app-server；支持勾选多台批量推送
 
 ## 使用
 
@@ -62,12 +69,14 @@ source <(curl -sSL https://example.com/setup_proxy.sh) >/dev/null 2>&1 || true
 server/       Express 后端（无构建步骤）
   index.mjs     API / SSE / 静态托管
   hosts.mjs     主机清单（ssh config 解析 + 覆盖）
-  tools.mjs     检查 / 更新 / 重启的领域逻辑与脚本构建
-  exec.mjs      本机 pwsh 与远程 ssh 执行层
+  tools.mjs     检查 / 更新 / 重启 / catalog 推送的领域逻辑与脚本构建
+  catalogs.mjs  模型 catalog 存储、校验、合并、OAI 下载、优先级重排
+  exec.mjs      本机 pwsh 与远程 ssh 执行层（支持 stdin 传输 payload）
   store.mjs     data/config.json 与 state.json 持久化
   tasks.mjs     任务与实时日志
-src/          React 前端（单页仪表盘）
+src/          React 前端（主机管理 / 模型目录 两页，目录页按需加载 CodeMirror）
 data/         运行时配置与状态快照（不入库）
+  catalogs/     models.*.json 模型目录文件（不入库）
 ```
 
 ## 安全
@@ -81,4 +90,5 @@ data/         运行时配置与状态快照（不入库）
 npm run typecheck        # 前端 TS 检查
 node --check server/*.mjs # 后端语法检查
 node scripts/ui-smoke.mjs # UI 冒烟（需要本机 Edge，npx playwright install chromium）
+node scripts/ui-smoke-catalogs.mjs # 模型目录页 UI 冒烟
 ```

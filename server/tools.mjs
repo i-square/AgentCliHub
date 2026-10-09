@@ -1,18 +1,21 @@
-// 领域逻辑：Codex CLI / Claude Code 的状态检查、npm 更新（含 rename 失败清理重试）、app-server 重启
+// 领域逻辑：Codex CLI / Claude Code 的状态检查、npm 更新（含 rename 失败清理重试）、app-server 重启、模型目录推送
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { runLocalPwsh, runRemoteBash } from "./exec.mjs";
+import { runLocalPwsh, runRemoteBash, runRemoteCmd } from "./exec.mjs";
 
 export const TOOLS = {
   codex: { label: "Codex CLI", bin: "codex", npmPkg: "@openai/codex" },
   claude: { label: "Claude Code", bin: "claude", npmPkg: "@anthropic-ai/claude-code" }
 };
 
+export const DEFAULT_CATALOG_TARGET = "~/.codex/models.json";
+
 // nvm 管理的 node 优先：用户的 CLI 通常装在 nvm 版本目录而非系统 node 下。
 // 逐目录 prepend，glob 升序展开后最高版本最终位于 PATH 最前；无 ~/.nvm 时为无操作。
 const AUTO_PRELUDE = [
-  'for d in "$HOME"/.nvm/versions/node/*/bin; do',
-  '  [ -x "$d/npm" ] && PATH="$d:$PATH"',
+  "for d in \"$HOME\"/.nvm/versions/node/*/bin; do",
+  "  [ -x \"$d/npm\" ] && PATH=\"$d:$PATH\"",
   "done",
   "export PATH"
 ].join("\n");
@@ -22,6 +25,57 @@ function bashPrelude(host) {
   if (host.prelude?.trim()) parts.push(host.prelude.trim());
   parts.push(AUTO_PRELUDE);
   return parts.join("\n");
+}
+
+/** bash 单引号包裹（内含单引号的安全转义） */
+function sq(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/** 目标路径在远程 bash 中的展开表达式：~/ 前缀交给 $HOME，其余按字面量 */
+function remotePathExpr(p) {
+  const t = (p ?? "").trim();
+  if (t === "~") return '"$HOME"';
+  if (t.startsWith("~/")) return `"$HOME/${t.slice(2).replace(/["$`\\]/g, "\\$&")}"`;
+  return sq(t);
+}
+
+/** 本机路径展开：~ 前缀替换为 os.homedir() */
+function expandHomeLocal(p) {
+  const t = (p ?? "").trim();
+  if (t === "~") return os.homedir();
+  if (t.startsWith("~/") || t.startsWith("~\\")) return path.join(os.homedir(), t.slice(2));
+  return t;
+}
+
+/** 路径等价比较：展开 ~、统一分隔符；本机 Windows 不区分大小写 */
+function normalizeCatalogPath(p, home, caseInsensitive) {
+  let s = (p ?? "").trim();
+  if (!s) return "";
+  if (s === "~") s = home;
+  else if (s.startsWith("~/") || s.startsWith("~\\")) s = home.replace(/[\\/]+$/, "") + "/" + s.slice(2);
+  s = s.replace(/[\\/]+/g, "/").replace(/\/+$/, "");
+  return caseInsensitive ? s.toLowerCase() : s;
+}
+
+/**
+ * catalog 推送就绪判定（仅提示与门控，不修改目标机 config.toml）：
+ * config.toml 开启了 model_catalog_json 且路径与 hub 设置的目标路径一致，才允许推送。
+ */
+export function catalogReadiness(host, st, targetPath) {
+  if (!st?.checkedAt || st.catalogJson === undefined) {
+    return { ready: false, reason: "尚未采集该主机的 catalog 配置，请先执行一次「检查」" };
+  }
+  const configured = (st.catalogJson ?? "").trim();
+  if (!configured) {
+    return { ready: false, reason: "该主机 config.toml 未开启 model_catalog_json，codex 不会加载本地 catalog 文件" };
+  }
+  const home = host.kind === "local" ? os.homedir() : st.home ?? "~";
+  const caseInsensitive = host.kind === "local";
+  if (normalizeCatalogPath(configured, home, caseInsensitive) !== normalizeCatalogPath(targetPath, home, caseInsensitive)) {
+    return { ready: false, reason: `config.toml 中的路径「${configured}」与目标路径「${targetPath}」不一致` };
+  }
+  return { ready: true, reason: "" };
 }
 
 /** 从 `codex-cli 0.156.1` / `2.1.280 (Claude Code)` 这类输出中提取 semver */
@@ -44,11 +98,14 @@ function parseStatusBlock(output) {
     codex: extractSemver(fields.codex),
     claude: extractSemver(fields.claude),
     latestCodex: extractSemver(fields.latestCodex),
-    latestClaude: extractSemver(fields.latestClaude)
+    latestClaude: extractSemver(fields.latestClaude),
+    home: fields.home ?? "",
+    catalogJson: fields.catalogJson ?? "",
+    catalogHash: fields.catalogHash ?? ""
   };
 }
 
-function remoteStatusScript(host) {
+function remoteStatusScript(host, catalogTarget) {
   return `${bashPrelude(host)}
 echo "__STATUS_BEGIN__"
 echo "npmRoot=$(npm root -g 2>/dev/null)"
@@ -57,10 +114,25 @@ echo "codex=$(codex --version 2>/dev/null | head -n 1)"
 echo "claude=$(claude --version 2>/dev/null | head -n 1)"
 echo "latestCodex=$(npm view ${TOOLS.codex.npmPkg} version 2>/dev/null | tail -n 1)"
 echo "latestClaude=$(npm view ${TOOLS.claude.npmPkg} version 2>/dev/null | tail -n 1)"
+echo "home=$HOME"
+cfg="$HOME/.codex/config.toml"
+mcj=$(grep -E "^[[:space:]]*model_catalog_json[[:space:]]*=" "$cfg" 2>/dev/null | head -n 1 | sed -E "s/^[^\\"]*\\"([^\\"]*)\\".*$/\\1/")
+echo "catalogJson=$mcj"
+t=${remotePathExpr(catalogTarget)}
+if [ -f "$t" ]; then
+  h=$(sha256sum "$t" 2>/dev/null | cut -c1-12)
+  [ -z "$h" ] && h=$(shasum -a 256 "$t" 2>/dev/null | cut -c1-12)
+  [ -z "$h" ] && h=$(openssl dgst -sha256 "$t" 2>/dev/null | sed -E "s/.*= //" | cut -c1-12)
+  echo "catalogHash=$h"
+else
+  echo "catalogHash="
+fi
 echo "__STATUS_END__"`;
 }
 
-const LOCAL_STATUS_SCRIPT = `
+function localStatusScript(catalogTarget) {
+  const targetPs = expandHomeLocal(catalogTarget).replace(/'/g, "''");
+  return `
 $ErrorActionPreference = 'Continue'
 function Get-CmdVersion($name) {
   if (Get-Command $name -ErrorAction SilentlyContinue) {
@@ -71,6 +143,10 @@ function Get-CmdVersion($name) {
 function Get-NpmView($pkg) {
   try { return (npm view $pkg version 2>$null | Select-Object -Last 1) } catch { return '' }
 }
+function Get-CatalogHash($p) {
+  if (Test-Path $p) { try { return (Get-FileHash -Algorithm SHA256 $p).Hash.Substring(0,12).ToLower() } catch { return '' } }
+  return ''
+}
 Write-Output '__STATUS_BEGIN__'
 Write-Output ('npmRoot=' + ((npm root -g 2>$null) | Select-Object -Last 1))
 Write-Output ('node=' + (node -v 2>$null))
@@ -78,17 +154,61 @@ Write-Output ('codex=' + (Get-CmdVersion codex))
 Write-Output ('claude=' + (Get-CmdVersion claude))
 Write-Output ('latestCodex=' + (Get-NpmView '${TOOLS.codex.npmPkg}'))
 Write-Output ('latestClaude=' + (Get-NpmView '${TOOLS.claude.npmPkg}'))
+Write-Output ('home=' + $HOME)
+$mcj = ''
+$cfg = Join-Path $HOME '.codex\\config.toml'
+if (Test-Path $cfg) {
+  $hit = Select-String -Path $cfg -Pattern '^\\s*model_catalog_json\\s*=\\s*"([^"]*)"' | Select-Object -First 1
+  if ($hit) { $mcj = $hit.Matches[0].Groups[1].Value }
+}
+Write-Output ('catalogJson=' + $mcj)
+Write-Output ('catalogHash=' + (Get-CatalogHash '${targetPs}'))
 Write-Output '__STATUS_END__'
 `;
+}
 
-export async function checkHost(host, onData) {
+export async function checkHost(host, onData, catalogTarget = DEFAULT_CATALOG_TARGET) {
   const result =
     host.kind === "local"
-      ? await runLocalPwsh(LOCAL_STATUS_SCRIPT, { onData, timeoutMs: 120_000 })
-      : await runRemoteBash(host.id, remoteStatusScript(host), { onData, timeoutMs: 120_000 });
+      ? await runLocalPwsh(localStatusScript(catalogTarget), { onData, timeoutMs: 120_000 })
+      : await runRemoteBash(host.id, remoteStatusScript(host, catalogTarget), { onData, timeoutMs: 120_000 });
   const status = parseStatusBlock(result.output);
   if (!status) throw new Error("未能解析状态输出，请检查主机连通性与 prelude 配置");
   return status;
+}
+
+/**
+ * 推送合并后的 catalog 到目标主机：原子写入目标路径 + 删除 models_cache.json。
+ * 本机直接用 fs；远程经 ssh stdin 传输 base64 内容（避开命令行长度上限），
+ * cache 删除用 \rm 显式绕过 rm -i 类 alias 造成的交互阻塞。
+ */
+export async function pushCatalog(host, rendered, { targetPath, onData }) {
+  if (host.kind === "local") {
+    const target = expandHomeLocal(targetPath);
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    const tmp = `${target}.codexhub-tmp`;
+    await fs.promises.writeFile(tmp, rendered, "utf8");
+    await fs.promises.rename(tmp, target);
+    onData(`已写入 ${target}\n`);
+    const cache = path.join(path.dirname(target), "models_cache.json");
+    await fs.promises.rm(cache, { force: true });
+    onData(`已删除 ${cache}\n`);
+    return;
+  }
+  const script = [
+    "set -e",
+    `t=${remotePathExpr(targetPath)}`,
+    `mkdir -p "$(dirname "$t")"`,
+    `tmp="$t.codexhub-$$"`,
+    `base64 -d > "$tmp"`,
+    `mv -f "$tmp" "$t"`,
+    `echo "已写入 $t"`,
+    `\\rm -f "$(dirname "$t")/models_cache.json"`,
+    `echo "已删除 $(dirname "$t")/models_cache.json"`
+  ].join("\n");
+  const b64 = Buffer.from(rendered, "utf8").toString("base64");
+  const result = await runRemoteCmd(host.id, script, { input: b64, onData, timeoutMs: 60_000 });
+  if (result.code !== 0) throw new Error("远程写入 catalog 失败，详见日志");
 }
 
 function remoteUpdateScript(host, pkg) {
@@ -139,7 +259,7 @@ async function deletePaths(host, paths, onData) {
       await fs.promises.rm(p, { recursive: true, force: true });
     }
   } else {
-    const quoted = paths.map((p) => `'${p.replace(/'/g, `'\\''`)}'`).join(" ");
+    const quoted = paths.map(sq).join(" ");
     await runRemoteBash(host.id, `rm -rf -- ${quoted}`, {
       onData: (c) => onData(`[cleanup] rm -rf ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
     });
@@ -224,5 +344,3 @@ export async function restartAppServer(host, onData) {
 export function isLocalHost(host) {
   return host.kind === "local";
 }
-
-

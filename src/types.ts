@@ -24,11 +24,23 @@ export interface HostState {
   latestCodex?: string;
   latestClaude?: string;
   checkedAt?: string;
+  home?: string;
+  catalogJson?: string;
+  catalogHash?: string;
+  catalogPushedAt?: string;
+}
+
+export interface CatalogSettings {
+  sourceUrl: string;
+  targetPath: string;
+  forceResponsesLiteFalse: boolean;
+  priorities: Record<string, [number, number]>;
 }
 
 export interface Config {
   excludePatterns: string[];
   hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string }>;
+  catalog: CatalogSettings;
 }
 
 export interface HostsResponse {
@@ -48,4 +60,31 @@ export interface Task {
   endedAt: string | null;
   summary: string;
   logLength: number;
+}
+
+export interface CatalogFileInfo {
+  name: string;
+  key: string;
+  isBuiltin: boolean;
+  valid: boolean;
+  error: string;
+  modelCount: number;
+  priorityMin: number | null;
+  priorityMax: number | null;
+  updatedAt: string;
+}
+
+export interface CatalogsResponse {
+  files: CatalogFileInfo[];
+  settings: CatalogSettings;
+}
+
+export interface MergedInfo {
+  hash: string;
+  modelCount: number;
+  conflicts: { slug: string; files: string[]; winner: string }[];
+  baselineHash: string | null;
+  added: string[];
+  removed: string[];
+  changed: string[];
 }

@@ -5,7 +5,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig, loadState, saveState } from "./store.mjs";
 import { buildHostList, getHost } from "./hosts.mjs";
-import { TOOLS, checkHost, updateTool, restartAppServer } from "./tools.mjs";
+import { TOOLS, checkHost, updateTool, restartAppServer, pushCatalog, catalogReadiness } from "./tools.mjs";
+import {
+  OAI_NAME,
+  listCatalogs,
+  readCatalogText,
+  writeCatalog,
+  createCatalog,
+  deleteCatalog,
+  refreshOai,
+  mergeCatalogs,
+  baselineFrom,
+  summarize,
+  renumber,
+  isValidName,
+  catalogKey
+} from "./catalogs.mjs";
 import { TaskManager } from "./tasks.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
@@ -14,7 +29,7 @@ const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工�
 const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tasks = new TaskManager();
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" })); // catalog 文件可能接近 1MB
 
 // ---------- SSE ----------
 const sseClients = new Set();
@@ -56,11 +71,95 @@ app.get("/api/settings", (req, res) => res.json(loadConfig()));
 
 app.put("/api/settings", (req, res) => {
   const config = loadConfig();
-  const { excludePatterns } = req.body ?? {};
+  const { excludePatterns, catalog } = req.body ?? {};
   if (Array.isArray(excludePatterns)) config.excludePatterns = excludePatterns.filter((s) => typeof s === "string");
+  if (catalog && typeof catalog === "object") {
+    if (typeof catalog.sourceUrl === "string" && catalog.sourceUrl.trim()) config.catalog.sourceUrl = catalog.sourceUrl.trim();
+    if (typeof catalog.targetPath === "string" && catalog.targetPath.trim()) config.catalog.targetPath = catalog.targetPath.trim();
+    if (typeof catalog.forceResponsesLiteFalse === "boolean") config.catalog.forceResponsesLiteFalse = catalog.forceResponsesLiteFalse;
+  }
   saveConfig(config);
   res.json({ ok: true });
 });
+
+// ---------- 模型目录 ----------
+const wrap = (fn) => (req, res) => {
+  try {
+    fn(req, res);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
+
+app.get("/api/catalogs", (req, res) => {
+  res.json({ files: listCatalogs(), settings: loadConfig().catalog });
+});
+
+// 注意：/api/catalogs/merged 必须注册在 /api/catalogs/:name 之前
+app.get("/api/catalogs/merged", (req, res) => {
+  try {
+    const config = loadConfig();
+    const merged = mergeCatalogs(config.catalog);
+    const baseline = loadState().catalogBaseline ?? null;
+    res.json({
+      hash: merged.hash,
+      modelCount: merged.modelCount,
+      conflicts: merged.conflicts,
+      baselineHash: baseline?.hash ?? null,
+      ...summarize(baseline, merged)
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get("/api/catalogs/:name", (req, res) => {
+  try {
+    res.json({ name: req.params.name, content: readCatalogText(req.params.name) });
+  } catch {
+    res.status(404).json({ error: `catalog 不存在: ${req.params.name}` });
+  }
+});
+
+app.put("/api/catalogs/:name", wrap((req, res) => {
+  const content = req.body?.content;
+  if (typeof content !== "string") return res.status(400).json({ error: "缺少 content 字符串" });
+  res.json({ ok: true, file: writeCatalog(req.params.name, content) });
+}));
+
+app.post("/api/catalogs", wrap((req, res) => {
+  const key = String(req.body?.key ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(key)) return res.status(400).json({ error: "名称只能包含小写字母、数字、连字符" });
+  if (key === catalogKey(OAI_NAME)) return res.status(400).json({ error: "oai 为内置保留名" });
+  res.json({ ok: true, file: createCatalog(key) });
+}));
+
+app.delete("/api/catalogs/:name", wrap((req, res) => {
+  deleteCatalog(req.params.name);
+  res.json({ ok: true });
+}));
+
+app.post("/api/catalogs/oai/refresh", async (req, res) => {
+  try {
+    const { sourceUrl } = loadConfig().catalog;
+    const file = await refreshOai(sourceUrl);
+    res.json({ ok: true, file });
+  } catch (err) {
+    res.status(502).json({ error: `下载 OAI catalog 失败：${err.message}` });
+  }
+});
+
+app.post("/api/catalogs/:name/renumber", wrap((req, res) => {
+  const start = Number(req.body?.start);
+  if (!Number.isInteger(start) || start < 0) return res.status(400).json({ error: "start 必须是非负整数" });
+  const file = renumber(req.params.name, start);
+  // 记住该文件上次使用的优先级起点，作为下次的默认输入
+  const config = loadConfig();
+  const key = catalogKey(req.params.name);
+  if (key) config.catalog.priorities[key] = [start, start + 100];
+  saveConfig(config);
+  res.json({ ok: true, file });
+}));
 
 // ---------- 任务 ----------
 app.get("/api/tasks", (req, res) => res.json({ tasks: tasks.list() }));
@@ -90,7 +189,7 @@ function startTask(req, res, action, label, run) {
 
 app.post("/api/hosts/:id/check", (req, res) =>
   startTask(req, res, "check", "检查状态", async (host, onData) => {
-    const status = await checkHost(host, onData);
+    const status = await checkHost(host, onData, loadConfig().catalog.targetPath);
     const state = loadState();
     state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
     saveState(state);
@@ -104,7 +203,7 @@ app.post("/api/hosts/:id/update", (req, res) => {
   startTask(req, res, "update", `更新 ${TOOLS[tool].label}`, async (host, onData) => {
     const r = await updateTool(host, tool, onData);
     // 更新成功后立刻重新检查，刷新版本快照
-    const status = await checkHost(host, () => {});
+    const status = await checkHost(host, () => {}, loadConfig().catalog.targetPath);
     const state = loadState();
     state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
     saveState(state);
@@ -119,6 +218,35 @@ app.post("/api/hosts/:id/restart-app-server", (req, res) =>
   })
 );
 
+app.post("/api/hosts/:id/catalog-push", (req, res) =>
+  startTask(req, res, "catalog-push", "推送模型目录", async (host, onData) => {
+    const config = loadConfig();
+    const state = loadState();
+    const readiness = catalogReadiness(host, state.hosts[host.id], config.catalog.targetPath);
+    if (!readiness.ready) throw new Error(`已阻止推送：${readiness.reason}`);
+
+    const merged = mergeCatalogs(config.catalog);
+    onData(`合并 ${merged.modelCount} 个模型，hash=${merged.hash}\n`);
+    if (merged.conflicts.length) {
+      onData(`[warn] 存在 slug 冲突：${merged.conflicts.map((c) => `${c.slug}(${c.winner} 胜出)`).join("、")}\n`);
+    }
+    await pushCatalog(host, merged.rendered, { targetPath: config.catalog.targetPath, onData });
+
+    state.catalogBaseline = baselineFrom(merged);
+    state.hosts[host.id] = {
+      ...state.hosts[host.id],
+      catalogHash: merged.hash,
+      catalogPushedAt: new Date().toISOString()
+    };
+    saveState(state);
+
+    if (req.body?.restart) {
+      await restartAppServer(host, onData);
+    }
+    return `已推送 ${merged.modelCount} 个模型（hash ${merged.hash}）`;
+  })
+);
+
 app.post("/api/check-all", (req, res) => {
   const config = loadConfig();
   const hosts = buildHostList(config).filter((h) => h.enabled);
@@ -128,7 +256,7 @@ app.post("/api/check-all", (req, res) => {
     ids.push(task.id);
     (async () => {
       try {
-        const status = await checkHost(host, (c) => tasks.append(task.id, c));
+        const status = await checkHost(host, (c) => tasks.append(task.id, c), config.catalog.targetPath);
         const state = loadState();
         state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
         saveState(state);

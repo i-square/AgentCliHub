@@ -25,3 +25,15 @@ id_rsa*
 .vscode/
 .idea/
 
+
+# Local scratch (copied reference files, may contain secrets)
+tmp/
+
+
+# Serena 符号索引缓存
+.serena/
+
+
+# 本机维护笔记（私有）
+AGENTS.md
+

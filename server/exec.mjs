@@ -6,10 +6,11 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 /**
  * @param {string} cmd
  * @param {string[]} args
- * @param {{onData?: (chunk: string) => void, timeoutMs?: number}} opts
+ * @param {{onData?: (chunk: string) => void, timeoutMs?: number, input?: string | Buffer}} opts
+ *   input：写入子进程 stdin 后关闭（用于经 ssh 向远程传输文件内容，避免命令行长度上限）
  * @returns {Promise<{code: number, output: string}>}
  */
-function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { windowsHide: true });
     let output = "";
@@ -34,6 +35,11 @@ function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
       clearTimeout(timer);
       resolve({ code: code ?? -1, output });
     });
+    if (input !== undefined) {
+      child.stdin.on("error", () => {}); // 远程提前退出时忽略 EPIPE
+      child.stdin.write(input);
+      child.stdin.end();
+    }
   });
 }
 
@@ -50,6 +56,15 @@ export function runRemoteBash(alias, script, opts = {}) {
   return run(
     "ssh",
     ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, remoteCmd],
+    opts
+  );
+}
+
+/** 远程执行原生命令（stdin 可携带 payload，如 base64 编码的文件内容） */
+export function runRemoteCmd(alias, cmd, opts = {}) {
+  return run(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, cmd],
     opts
   );
 }

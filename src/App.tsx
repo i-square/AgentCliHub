@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+// CodeMirror 体积较大，目录页按需加载
+const CatalogsPage = lazy(() => import("./CatalogsPage"));
 import type { Host, HostState, HostsResponse, Task } from "./types";
 
 type ToolId = "codex" | "claude";
@@ -60,6 +62,7 @@ export default function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
   const [theme, setTheme] = useTheme();
+  const [view, setView] = useState<"hosts" | "catalogs">("hosts");
 
   const refreshHosts = useCallback(async () => {
     try {
@@ -99,7 +102,7 @@ export default function App() {
           next.set(t.id, { ...next.get(t.id), ...t });
           return next;
         });
-        if (t.status !== "running" && (t.action === "check" || t.action === "update")) refreshHosts();
+        if (t.status !== "running" && ["check", "update", "catalog-push"].includes(t.action)) refreshHosts();
       }
     };
     return () => es.close();
@@ -190,6 +193,10 @@ export default function App() {
     <div className="page">
       <header className="topbar">
         <h1>CodexHub <span className="subtitle">Codex / Claude Code 更新管理</span></h1>
+        <nav className="view-switch" role="group" aria-label="页面切换">
+          <button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")}>主机管理</button>
+          <button className={view === "catalogs" ? "active" : ""} onClick={() => setView("catalogs")}>模型目录</button>
+        </nav>
         <div className="topbar-actions">
           <ThemeSwitcher mode={theme} onChange={setTheme} />
           <button onClick={() => runAction(api.checkAll)}>全部检查</button>
@@ -197,6 +204,8 @@ export default function App() {
         </div>
       </header>
 
+      {view === "hosts" && (
+        <>
       <div className="batchbar">
         <label className="select-all">
           <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={enabledHosts.length === 0} />
@@ -271,6 +280,14 @@ export default function App() {
           ))}
         </tbody>
       </table>
+        </>
+      )}
+
+      {view === "catalogs" && (
+        <Suspense fallback={<p className="loading">加载编辑器……</p>}>
+          <CatalogsPage hosts={data.hosts} state={data.state} config={data.config} />
+        </Suspense>
+      )}
 
       <section className="tasks">
         <h2>任务日志</h2>
