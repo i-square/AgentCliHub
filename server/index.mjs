@@ -22,6 +22,8 @@ import {
   catalogKey
 } from "./catalogs.mjs";
 import { TaskManager } from "./tasks.mjs";
+import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
+import { probeHost } from "./probe.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
 const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工具可执行远程命令，勿暴露到公网
@@ -77,6 +79,16 @@ app.put("/api/settings", (req, res) => {
     if (typeof catalog.sourceUrl === "string" && catalog.sourceUrl.trim()) config.catalog.sourceUrl = catalog.sourceUrl.trim();
     if (typeof catalog.targetPath === "string" && catalog.targetPath.trim()) config.catalog.targetPath = catalog.targetPath.trim();
     if (typeof catalog.forceResponsesLiteFalse === "boolean") config.catalog.forceResponsesLiteFalse = catalog.forceResponsesLiteFalse;
+  }
+  const { versions, download } = req.body ?? {};
+  if (versions && typeof versions === "object") {
+    const m = Number(versions.checkIntervalMinutes);
+    if (Number.isFinite(m) && m >= 5 && m <= 7 * 24 * 60) config.versions.checkIntervalMinutes = Math.round(m);
+  }
+  if (download && typeof download === "object") {
+    for (const k of ["proxy", "githubMirror", "githubToken"]) {
+      if (typeof download[k] === "string") config.download[k] = download[k].trim();
+    }
   }
   saveConfig(config);
   res.json({ ok: true });
@@ -160,6 +172,38 @@ app.post("/api/catalogs/:name/renumber", wrap((req, res) => {
   saveConfig(config);
   res.json({ ok: true, file });
 }));
+
+// ---------- 版本缓存（仅 hub 本机查外网）与深度探测 ----------
+app.get("/api/tool-versions", (req, res) => {
+  const state = loadState();
+  const config = loadConfig();
+  res.json({
+    versions: state.toolVersions ?? {},
+    checkIntervalMinutes: versionsConfig(config).checkIntervalMinutes,
+    proxyConfigured: Boolean(config.download?.proxy)
+  });
+});
+
+app.post("/api/tool-versions/refresh", async (req, res) => {
+  try {
+    await refreshVersions(loadConfig(), { force: true });
+    res.json({ ok: true, versions: loadState().toolVersions ?? {} });
+  } catch (err) {
+    res.status(502).json({ error: `刷新版本缓存失败：${err.message}` });
+  }
+});
+
+app.post("/api/hosts/:id/probe", (req, res) =>
+  startTask(req, res, "probe", "深度探测", async (host, onData) => {
+    const result = await probeHost(host, onData);
+    const state = loadState();
+    state.hosts[host.id] = { ...state.hosts[host.id], probe: result };
+    saveState(state);
+    const codexN = result.candidates.filter((c) => c.tool === "codex").length;
+    const claudeN = result.candidates.filter((c) => c.tool === "claude").length;
+    return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
+  })
+);
 
 // ---------- 任务 ----------
 app.get("/api/tasks", (req, res) => res.json({ tasks: tasks.list() }));
@@ -280,6 +324,9 @@ if (fs.existsSync(distDir)) {
     res.type("text").send("前端尚未构建。开发请用 `pnpm dev`，或先 `pnpm build` 再 `pnpm start`。")
   );
 }
+
+// 版本缓存调度：启动时按上次检查时间决定，之后按间隔定时检查
+startVersionScheduler(loadConfig);
 
 app.listen(PORT, HOST, () => {
   console.log(`AgentCliHub 已启动: http://${HOST}:${PORT}`);

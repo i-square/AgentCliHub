@@ -1,4 +1,4 @@
-import type { CatalogsResponse, Config, HostsResponse, MergedInfo, Task } from "./types";
+import type { CatalogsResponse, Config, HostsResponse, MergedInfo, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -31,12 +31,22 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(override)
     }),
-  saveSettings: (settings: { excludePatterns?: string[]; catalog?: Partial<Config["catalog"]> }) =>
+  saveSettings: (settings: {
+    excludePatterns?: string[];
+    catalog?: Partial<Config["catalog"]>;
+    versions?: { checkIntervalMinutes?: number };
+    download?: { proxy?: string; githubMirror?: string; githubToken?: string };
+  }) =>
     req<{ ok: true }>("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(settings)
     }),
+
+  // ----- 版本缓存与深度探测（M1） -----
+  getToolVersions: () => req<ToolVersionsResponse>("/api/tool-versions"),
+  refreshToolVersions: () => req<{ ok: true; versions: ToolVersions }>("/api/tool-versions/refresh", { method: "POST" }),
+  probeHost: (id: string) => req<{ taskId: string }>(`/api/hosts/${id}/probe`, { method: "POST" }),
 
   // ----- 模型目录 -----
   getCatalogs: () => req<CatalogsResponse>("/api/catalogs"),

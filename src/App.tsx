@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { api } from "./api";
 // CodeMirror 体积较大，目录页按需加载
 const CatalogsPage = lazy(() => import("./CatalogsPage"));
-import type { Host, HostState, HostsResponse, Task } from "./types";
+import type { Config, Host, HostState, HostsResponse, ProbeResult, Task, ToolVersionsResponse } from "./types";
 
 type ToolId = "codex" | "claude";
 type ThemeMode = "light" | "dark" | "system";
@@ -63,6 +63,8 @@ export default function App() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [theme, setTheme] = useTheme();
   const [view, setView] = useState<"hosts" | "catalogs">("hosts");
+  const [versions, setVersions] = useState<ToolVersionsResponse | null>(null);
+  const [probeHostId, setProbeHostId] = useState<string | null>(null);
 
   const refreshHosts = useCallback(async () => {
     try {
@@ -82,9 +84,18 @@ export default function App() {
     });
   }, []);
 
+  const loadVersions = useCallback(async () => {
+    try {
+      setVersions(await api.getToolVersions());
+    } catch {
+      /* 版本缓存不可用不阻塞主界面 */
+    }
+  }, []);
+
   useEffect(() => {
     refreshHosts();
     refreshTasks();
+    loadVersions();
     const es = new EventSource("/api/events");
     es.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -102,11 +113,11 @@ export default function App() {
           next.set(t.id, { ...next.get(t.id), ...t });
           return next;
         });
-        if (t.status !== "running" && ["check", "update", "catalog-push"].includes(t.action)) refreshHosts();
+        if (t.status !== "running" && ["check", "update", "catalog-push", "probe"].includes(t.action)) refreshHosts();
       }
     };
     return () => es.close();
-  }, [refreshHosts, refreshTasks]);
+  }, [refreshHosts, refreshTasks, loadVersions]);
 
   const taskList = useMemo(
     () => [...tasks.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 30),
@@ -206,6 +217,7 @@ export default function App() {
 
       {view === "hosts" && (
         <>
+      <VersionBar versions={versions} onRefresh={() => runAction(async () => { await api.refreshToolVersions(); await loadVersions(); })} />
       <div className="batchbar">
         <label className="select-all">
           <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={enabledHosts.length === 0} />
@@ -276,6 +288,8 @@ export default function App() {
               onUpdate={(tool) => runAction(() => api.updateTool(h.id, tool))}
               onRestart={() => runAction(() => api.restartAppServer(h.id))}
               onEdit={() => setEditingHost(h)}
+              onProbe={() => runAction(() => api.probeHost(h.id))}
+              onShowProbe={() => setProbeHostId(h.id)}
             />
           ))}
         </tbody>
@@ -309,12 +323,21 @@ export default function App() {
 
       {settingsOpen && (
         <SettingsModal
-          excludePatterns={data.config.excludePatterns}
+          config={data.config}
+          versions={versions}
+          onVersionsChanged={loadVersions}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => {
             setSettingsOpen(false);
             refreshHosts();
           }}
+        />
+      )}
+      {probeHostId && data.state[probeHostId]?.probe && (
+        <ProbeModal
+          hostName={data.hosts.find((h) => h.id === probeHostId)?.name ?? probeHostId}
+          probe={data.state[probeHostId]!.probe!}
+          onClose={() => setProbeHostId(null)}
         />
       )}
       {editingHost && (
@@ -341,6 +364,8 @@ function HostRow(props: {
   onUpdate: (tool: ToolId) => void;
   onRestart: () => void;
   onEdit: () => void;
+  onProbe: () => void;
+  onShowProbe: () => void;
 }) {
   const { host, state, tasks } = props;
   const busy = tasks.length > 0;
@@ -373,12 +398,15 @@ function HostRow(props: {
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("codex")}
         extra={
-          <button
-            className="restart-btn"
+          <>
+            <ProbeBadges state={state} tool="codex" onShow={props.onShowProbe} />
+            <button
+              className="restart-btn"
             disabled={!host.enabled || busy}
             onClick={props.onRestart}
             title="结束后端 codex app-server 进程，Codex desktop 重连后自动拉起新版本"
           >重启 app-server</button>
+          </>
         }
       />
       <ToolCell
@@ -386,10 +414,12 @@ function HostRow(props: {
         latest={state.latestClaude}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("claude")}
+        extra={<ProbeBadges state={state} tool="claude" onShow={props.onShowProbe} />}
       />
       <td className="actions-cell">
         <div className="action-row">
           <button disabled={!host.enabled || busy} onClick={props.onCheck}>检查</button>
+          <button disabled={!host.enabled || busy} onClick={props.onProbe} title="只读枚举全部安装实例、PATH 视图与自动更新现状">探测</button>
           <button className="ghost" onClick={props.onEdit}>编辑</button>
         </div>
         <div className="hint-row">
@@ -465,18 +495,27 @@ function Modal(props: { title: string; onClose: () => void; children: React.Reac
 }
 
 function SettingsModal(props: {
-  excludePatterns: string[];
+  config: Config;
+  versions: ToolVersionsResponse | null;
+  onVersionsChanged: () => void;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [patterns, setPatterns] = useState(props.excludePatterns.join(", "));
+  const [patterns, setPatterns] = useState(props.config.excludePatterns.join(", "));
+  const [intervalMin, setIntervalMin] = useState(String(props.config.versions?.checkIntervalMinutes ?? 360));
+  const [proxy, setProxy] = useState(props.config.download?.proxy ?? "");
+  const [mirror, setMirror] = useState(props.config.download?.githubMirror ?? "");
+  const [token, setToken] = useState(props.config.download?.githubToken ?? "");
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const save = async () => {
     setSaving(true);
     try {
       await api.saveSettings({
-        excludePatterns: patterns.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+        excludePatterns: patterns.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
+        versions: { checkIntervalMinutes: Number(intervalMin) || 360 },
+        download: { proxy, githubMirror: mirror, githubToken: token }
       });
       props.onSaved();
     } catch (e) {
@@ -486,12 +525,61 @@ function SettingsModal(props: {
     }
   };
 
+  const refreshNow = async () => {
+    setRefreshing(true);
+    try {
+      await api.refreshToolVersions();
+      props.onVersionsChanged();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const v = props.versions?.versions;
+  const fmt = (iso?: string) => (iso ? new Date(iso).toLocaleString() : "从未");
   return (
     <Modal title="设置" onClose={props.onClose}>
       <label className="field">
         <span>主机排除模式（逗号分隔，支持 * 通配）</span>
         <input value={patterns} onChange={(e) => setPatterns(e.target.value)} />
       </label>
+
+      <fieldset className="field-group">
+        <legend>版本号缓存（只有本机查外网，远程主机不查）</legend>
+        <div className="kv muted">
+          codex 最新：{v?.codex?.latest ?? "未知"}{v?.codex?.stale ? "（获取失败，沿用旧值）" : ""}
+          {v?.codex?.source ? ` · 源 ${v.codex.source}` : ""}
+          <br />
+          claude 最新：{v?.claude?.latest ?? "未知"}（stable {v?.claude?.stable ?? "未知"}）
+          {v?.claude?.stale ? "（获取失败，沿用旧值）" : ""}
+          <br />
+          上次检查：{fmt(v?.fetchedAt)}
+          <button className="link" onClick={refreshNow} disabled={refreshing}>{refreshing ? "刷新中…" : "立即刷新"}</button>
+        </div>
+        <label className="field">
+          <span>检查间隔（分钟，默认 360 = 6 小时；启动时按上次检查时间决定是否检查）</span>
+          <input type="number" min={5} value={intervalMin} onChange={(e) => setIntervalMin(e.target.value)} />
+        </label>
+      </fieldset>
+
+      <fieldset className="field-group">
+        <legend>外网出口</legend>
+        <label className="field">
+          <span>代理模板（透传 curl --proxy，留空直连；例 socks5h://127.0.0.1:8888，认证内嵌 socks5h://user:pass@host:port）</span>
+          <input value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="socks5h://127.0.0.1:8888" />
+        </label>
+        <label className="field">
+          <span>GitHub 镜像前缀（可选，用于下载加速）</span>
+          <input value={mirror} onChange={(e) => setMirror(e.target.value)} placeholder="https://ghproxy.net/" />
+        </label>
+        <label className="field">
+          <span>GitHub Token（可选，提高 api.github.com 限额；仅存本机 config.json）</span>
+          <input type="password" value={token} onChange={(e) => setToken(e.target.value)} />
+        </label>
+      </fieldset>
+
       <div className="modal-actions">
         <button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存"}</button>
       </div>
@@ -536,6 +624,133 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
       </label>
       <div className="modal-actions">
         <button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------- M1：版本缓存条与深度探测 ----------
+
+const METHOD_LABELS: Record<string, { text: string; cls: string }> = {
+  "standalone-official": { text: "独立", cls: "green" },
+  "standalone-daemon": { text: "daemon", cls: "green" },
+  "npm-global": { text: "npm", cls: "gray" },
+  "npm-local": { text: "npm本地", cls: "gray" },
+  "desktop-bundled": { text: "桌面版", cls: "yellow" },
+  unknown: { text: "未知", cls: "gray" }
+};
+
+function VersionBar(props: { versions: ToolVersionsResponse | null; onRefresh: () => void }) {
+  if (!props.versions) return null;
+  const v = props.versions.versions;
+  const ago = v.fetchedAt ? `${Math.max(0, Math.round((Date.now() - Date.parse(v.fetchedAt)) / 60000))} 分钟前` : "从未";
+  return (
+    <div className="version-bar">
+      <span className="muted">版本缓存</span>
+      <span>codex {v.codex?.latest ?? "未知"}{v.codex?.stale ? " *" : ""}</span>
+      <span>claude {v.claude?.latest ?? "未知"}{v.claude?.stale ? " *" : ""}</span>
+      <span className="muted">更新于 {ago} · 每 {props.versions.checkIntervalMinutes} 分钟检查</span>
+      <button className="link" onClick={props.onRefresh}>立即刷新</button>
+    </div>
+  );
+}
+
+/** 工具单元格里的探测徽标：生效实例的安装方式 + 候选数量入口 */
+function ProbeBadges(props: { state: HostState; tool: ToolId; onShow: () => void }) {
+  const probe = props.state.probe;
+  if (!probe) return null;
+  const cands = probe.candidates.filter((c) => c.tool === props.tool);
+  if (!cands.length) return null;
+  const activePath = probe.contexts?.shell?.[props.tool];
+  const active = cands.find((c) => c.path === activePath);
+  const m = METHOD_LABELS[active?.method ?? "unknown"];
+  return (
+    <>
+      {active && <span className={`badge ${m.cls}`} title={active.path}>{m.text}</span>}
+      <button className="link" onClick={props.onShow} title="查看全部安装候选与 PATH 实况">候选×{cands.length}</button>
+    </>
+  );
+}
+
+const CTX_LABELS: Record<string, string> = { shell: "当前 shell", login: "登录 shell", interactive: "交互 shell" };
+
+function ProbeModal(props: { hostName: string; probe: ProbeResult; onClose: () => void }) {
+  const p = props.probe;
+  const kv = (label: string, value?: string) =>
+    value ? <div><span className="muted">{label}</span> <code>{value}</code></div> : null;
+  const hitEntries = p.pathEntries.filter((e) => e.codex || e.claude);
+  return (
+    <Modal title={`探测结果：${props.hostName}`} onClose={props.onClose}>
+      <div className="probe">
+        <p className="muted">探测于 {new Date(p.probedAt).toLocaleString()}{p.done ? "" : "（未完整结束，结果可能不全）"}</p>
+
+        <h4>环境</h4>
+        <div className="kv">
+          {kv("HOME", p.meta.home)}{kv("shell", p.meta.shell)}{kv("系统", p.meta.uname)}
+          {kv("node", p.meta.node)}{kv("npm 全局目录", p.meta.npmRoot)}
+          {kv("~/.codex 实际路径", p.meta.codexHomeReal)}
+        </div>
+
+        <h4>命令解析（PATH 生效顺序）</h4>
+        <div className="kv">
+          {(["shell", "login", "interactive"] as const).map((ctx) =>
+            p.contexts?.[ctx] ? (
+              <div key={ctx}>
+                <span className="muted">{CTX_LABELS[ctx]}</span>{" "}
+                codex → <code>{p.contexts[ctx].codex || "（未找到）"}</code>，
+                claude → <code>{p.contexts[ctx].claude || "（未找到）"}</code>
+              </div>
+            ) : null
+          )}
+        </div>
+
+        <h4>安装候选（{p.candidates.length}）</h4>
+        {p.candidates.length === 0 ? <p className="muted">未发现任何安装</p> : (
+          <table className="probe-table">
+            <thead><tr><th>工具</th><th>版本</th><th>方式</th><th>路径</th><th>实际指向</th></tr></thead>
+            <tbody>
+              {p.candidates.map((c) => {
+                const m = METHOD_LABELS[c.method] ?? METHOD_LABELS.unknown;
+                return (
+                  <tr key={c.path}>
+                    <td>{c.tool}</td>
+                    <td>{c.version || "—"}</td>
+                    <td><span className={`badge ${m.cls}`}>{m.text}</span>{c.shared && <span className="badge yellow">共享盘</span>}</td>
+                    <td><code>{c.path}</code></td>
+                    <td><code className="muted">{c.realPath}</code></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+
+        <h4>PATH 命中（{hitEntries.length}/{p.pathEntries.length}）</h4>
+        {hitEntries.length === 0 ? <p className="muted">当前 PATH 中没有 codex/claude</p> : (
+          <table className="probe-table">
+            <thead><tr><th>#</th><th>目录</th><th>codex</th><th>claude</th></tr></thead>
+            <tbody>
+              {hitEntries.map((e) => (
+                <tr key={e.index}><td>{e.index}</td><td><code>{e.dir}</code></td><td>{e.codex ? "✓" : ""}</td><td>{e.claude ? "✓" : ""}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <h4>官方自动更新现状</h4>
+        <div className="kv">
+          {kv("codex 启动检查", p.autoUpdate.codexCfgStartupCheck)}
+          {kv("codex daemon 自启", p.autoUpdate.codexCfgDaemonAutoStart)}
+          {kv("codex daemon 设置", p.autoUpdate.codexDaemonSettings)}
+          {kv("claude 设置", p.autoUpdate.claudeSettings)}
+        </div>
+
+        {p.procs && (
+          <>
+            <h4>相关进程</h4>
+            <pre className="log small">{p.procs.split(";").filter(Boolean).join("\n")}</pre>
+          </>
+        )}
       </div>
     </Modal>
   );

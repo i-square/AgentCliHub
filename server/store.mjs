@@ -23,6 +23,10 @@ const DEFAULT_CONFIG = {
   // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string } }
   hostOverrides: {},
   // 模型目录：OAI 下载源、推送目标路径、OAI 补丁开关、各 catalog 的优先级分段
+  // 版本号统取：固定间隔检查（分钟），启动时按上次检查时间决定是否立即检查
+  versions: { checkIntervalMinutes: 360 },
+  // 外网出口：代理模板（透传 curl --proxy，支持 socks5h://[user:pass@]host:port）、GitHub 镜像前缀与 token
+  download: { proxy: "", githubMirror: "", githubToken: "" },
   catalog: {
     sourceUrl: "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json",
     targetPath: "~/.codex/models.json",
@@ -53,6 +57,8 @@ export function loadConfig() {
     ...defaults,
     ...raw,
     hostOverrides: { ...defaults.hostOverrides, ...(raw.hostOverrides ?? {}) },
+    versions: { ...defaults.versions, ...(raw.versions ?? {}) },
+    download: { ...defaults.download, ...(raw.download ?? {}) },
     catalog: {
       ...defaults.catalog,
       ...(raw.catalog ?? {}),
