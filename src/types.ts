@@ -14,6 +14,8 @@ export interface Host {
   enabled: boolean;
   prelude: string;
   note: string;
+  /** 主机级安装目录覆盖（空 = 用全局工具默认） */
+  installDir: string;
 }
 
 export interface HostState {
@@ -41,12 +43,19 @@ export interface CatalogSettings {
 
 export interface Config {
   excludePatterns: string[];
-  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string }>;
+  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string }>;
   catalog: CatalogSettings;
   /** 版本号统取：固定检查间隔（分钟） */
   versions: { checkIntervalMinutes: number };
   /** 外网出口：代理模板 / GitHub 镜像前缀 / token */
   download: { proxy: string; githubMirror: string; githubToken: string };
+  /** 工具安装策略（method=standalone 默认 / npm 兜底；installDir 空=~/.local/bin；channel=stable|latest|prerelease|版本号） */
+  tools: Record<"codex" | "claude", { method: "standalone" | "npm"; installDir: string; channel: string }>;
+  /** 官方自动更新接管（默认全禁，hub 统一更新） */
+  autoUpdate: {
+    codex: { startupCheck: boolean; daemonAutoStart: boolean; daemonAutoUpdate: boolean; daemonIntervalMinutes: number };
+    claude: { disableAutoUpdater: boolean };
+  };
 }
 
 export interface HostsResponse {
@@ -111,6 +120,8 @@ export interface ProbeCandidate {
   tool: "codex" | "claude";
   method: string;
   shared: boolean;
+  /** 当前 shell 实际生效（探测时按解析路径匹配） */
+  activeInShell?: boolean;
 }
 
 export interface ProbeResult {
@@ -132,6 +143,7 @@ export interface ProbeResult {
 export interface ToolVersionEntry {
   latest?: string;
   stable?: string;
+  prerelease?: string;
   source?: string;
   fetchedAt?: string;
   stale?: boolean;
@@ -148,4 +160,27 @@ export interface ToolVersionsResponse {
   versions: ToolVersions;
   checkIntervalMinutes: number;
   proxyConfigured: boolean;
+}
+
+// ---------- 安装预检 ----------
+export interface PreflightContext {
+  name: string;
+  /** PATH 位置（1 起），-1 = 不在该上下文 PATH 中 */
+  position: number;
+  total: number;
+  /** 该上下文 command -v 解析到的同名程序（空 = 未找到） */
+  resolved: string;
+  shadowedBy: { index: number; dir: string; version: string; method: string }[];
+}
+
+export interface PreflightResult {
+  status: "ok" | "shadowed" | "not-on-path" | "need-probe";
+  contexts?: PreflightContext[];
+  shadowedContext?: string;
+  reason?: string;
+  position?: number;
+  totalEntries?: number;
+  shadowedBy?: { index: number; dir: string; version: string; method: string }[];
+  sharedWarning?: string;
+  installDir?: string;
 }

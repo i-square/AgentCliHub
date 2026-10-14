@@ -24,6 +24,8 @@ import {
 import { TaskManager } from "./tasks.mjs";
 import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
+import { installTool, preflight, resolveToolConfig } from "./install.mjs";
+import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
 const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工具可执行远程命令，勿暴露到公网
@@ -60,11 +62,12 @@ app.get("/api/hosts", (req, res) => {
 
 app.put("/api/hosts/:id/override", (req, res) => {
   const config = loadConfig();
-  const { enabled, prelude, note } = req.body ?? {};
+  const { enabled, prelude, note, installDir } = req.body ?? {};
   const o = (config.hostOverrides[req.params.id] ??= {});
   if (typeof enabled === "boolean") o.enabled = enabled;
   if (typeof prelude === "string") o.prelude = prelude;
   if (typeof note === "string") o.note = note;
+  if (typeof installDir === "string") o.installDir = installDir.trim();
   saveConfig(config);
   res.json({ ok: true });
 });
@@ -84,6 +87,25 @@ app.put("/api/settings", (req, res) => {
   if (versions && typeof versions === "object") {
     const m = Number(versions.checkIntervalMinutes);
     if (Number.isFinite(m) && m >= 5 && m <= 7 * 24 * 60) config.versions.checkIntervalMinutes = Math.round(m);
+  }
+  const { tools, autoUpdate } = req.body ?? {};
+  if (tools && typeof tools === "object") {
+    for (const t of ["codex", "claude"]) {
+      const v = tools[t];
+      if (!v || typeof v !== "object") continue;
+      if (v.method === "standalone" || v.method === "npm") config.tools[t].method = v.method;
+      if (typeof v.installDir === "string") config.tools[t].installDir = v.installDir.trim();
+      if (typeof v.channel === "string") config.tools[t].channel = v.channel.trim() || config.tools[t].channel;
+    }
+  }
+  if (autoUpdate && typeof autoUpdate === "object") {
+    const c = autoUpdate.codex ?? {};
+    for (const k of ["startupCheck", "daemonAutoStart", "daemonAutoUpdate"]) {
+      if (typeof c[k] === "boolean") config.autoUpdate.codex[k] = c[k];
+    }
+    const interval = Number(c.daemonIntervalMinutes);
+    if (Number.isFinite(interval) && interval >= 15) config.autoUpdate.codex.daemonIntervalMinutes = Math.round(interval);
+    if (typeof autoUpdate.claude?.disableAutoUpdater === "boolean") config.autoUpdate.claude.disableAutoUpdater = autoUpdate.claude.disableAutoUpdater;
   }
   if (download && typeof download === "object") {
     for (const k of ["proxy", "githubMirror", "githubToken"]) {
@@ -204,6 +226,48 @@ app.post("/api/hosts/:id/probe", (req, res) =>
     return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
   })
 );
+
+// ---------- 独立二进制安装 / 预检 / 清理 / PATH 修复 ----------
+app.post("/api/hosts/:id/preflight", (req, res) => {
+  const host = getHost(loadConfig(), req.params.id);
+  if (!host) return res.status(404).json({ error: `未知主机: ${req.params.id}` });
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const config = loadConfig();
+  const installDir = (req.body?.installDir || resolveToolConfig(config, host, tool).installDir).trim();
+  res.json(preflight(host, tool, installDir, loadState()));
+});
+
+app.post("/api/hosts/:id/install", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const { method, version, installDir } = req.body ?? {};
+  startTask(req, res, "install", `安装 ${TOOLS[tool].label}`, async (host, onData) => {
+    return await installTool(host, tool, { config: loadConfig(), method, version, installDir }, onData);
+  });
+});
+
+app.post("/api/hosts/:id/cleanup", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const keep = Number.isInteger(req.body?.keep) && req.body.keep >= 0 ? req.body.keep : 2;
+  startTask(req, res, "cleanup", `清理 ${TOOLS[tool].label} 旧版本`, async (host, onData) => {
+    return await cleanupTool(host, tool, keep, onData);
+  });
+});
+
+app.post("/api/hosts/:id/path-repair", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  startTask(req, res, "path-repair", "PATH 修复", async (host, onData) => {
+    const config = loadConfig();
+    const installDir = resolveToolConfig(config, host, tool).installDir;
+    onData(`installDir: ${installDir}\n`);
+    if (host.kind === "local") return await repairPathLocal(installDir, onData);
+    return await repairPathRemote(host, installDir, onData);
+  });
+});
+
 
 // ---------- 任务 ----------
 app.get("/api/tasks", (req, res) => res.json({ tasks: tasks.list() }));

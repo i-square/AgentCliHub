@@ -1,4 +1,4 @@
-import type { CatalogsResponse, Config, HostsResponse, MergedInfo, Task, ToolVersions, ToolVersionsResponse } from "./types";
+import type { CatalogsResponse, Config, HostsResponse, MergedInfo, PreflightResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -25,7 +25,7 @@ export const api = {
     req<{ taskId: string }>(`/api/hosts/${id}/update`, json({ tool })),
   restartAppServer: (id: string) =>
     req<{ taskId: string }>(`/api/hosts/${id}/restart-app-server`, { method: "POST" }),
-  saveHostOverride: (id: string, override: { enabled?: boolean; prelude?: string; note?: string }) =>
+  saveHostOverride: (id: string, override: { enabled?: boolean; prelude?: string; note?: string; installDir?: string }) =>
     req<{ ok: true }>(`/api/hosts/${id}/override`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -35,6 +35,8 @@ export const api = {
     excludePatterns?: string[];
     catalog?: Partial<Config["catalog"]>;
     versions?: { checkIntervalMinutes?: number };
+    tools?: Partial<Record<"codex" | "claude", Partial<Config["tools"]["codex"]>>>;
+    autoUpdate?: { codex?: Partial<Config["autoUpdate"]["codex"]>; claude?: Partial<Config["autoUpdate"]["claude"]> };
     download?: { proxy?: string; githubMirror?: string; githubToken?: string };
   }) =>
     req<{ ok: true }>("/api/settings", {
@@ -47,6 +49,14 @@ export const api = {
   getToolVersions: () => req<ToolVersionsResponse>("/api/tool-versions"),
   refreshToolVersions: () => req<{ ok: true; versions: ToolVersions }>("/api/tool-versions/refresh", { method: "POST" }),
   probeHost: (id: string) => req<{ taskId: string }>(`/api/hosts/${id}/probe`, { method: "POST" }),
+  preflight: (id: string, tool: "codex" | "claude", installDir?: string) =>
+    req<PreflightResult>(`/api/hosts/${id}/preflight`, json({ tool, installDir })),
+  installTool: (id: string, payload: { tool: "codex" | "claude"; method?: string; version?: string; installDir?: string }) =>
+    req<{ taskId: string }>(`/api/hosts/${id}/install`, json(payload)),
+  cleanupTool: (id: string, tool: "codex" | "claude", keep = 2) =>
+    req<{ taskId: string }>(`/api/hosts/${id}/cleanup`, json({ tool, keep })),
+  pathRepair: (id: string, tool: "codex" | "claude") =>
+    req<{ taskId: string }>(`/api/hosts/${id}/path-repair`, json({ tool })),
 
   // ----- 模型目录 -----
   getCatalogs: () => req<CatalogsResponse>("/api/catalogs"),

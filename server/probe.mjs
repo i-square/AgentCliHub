@@ -290,6 +290,26 @@ function parseProbeOutput(host, output) {
       r.meta[k] = v;
     }
   }
+  // 入口副本归类：installDir 下的复制件 realPath 即自身，无法靠链接识别；
+  // 若与同机 standalone 本体同版本，则归为 standalone-entry（入口副本）
+  for (const c of r.candidates) {
+    if (c.method !== "unknown" || !c.version) continue;
+    const twin = r.candidates.find((o) => o.tool === c.tool && o.method === "standalone-official" && o.version === c.version);
+    if (twin) c.method = "standalone-entry";
+  }
+  // 标记当前 shell 生效实例：精确路径 → 去扩展名 → npm shim 归属 npm-global 候选
+  const norm = (x) => (x ?? "").replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+  for (const tool of ["codex", "claude"]) {
+    const resolved = r.contexts.shell?.[tool] ?? "";
+    if (!resolved) continue;
+    const nr = norm(resolved);
+    const nrNoExt = nr.replace(/\.(ps1|cmd|exe|js)$/, "");
+    let hit = r.candidates.find(
+      (c) => c.tool === tool && (norm(c.path) === nr || norm(c.path).replace(/\.(ps1|cmd|exe|js)$/, "") === nrNoExt || norm(c.realPath) === nr)
+    );
+    if (!hit && /\/npm(\/|$)/.test(nr)) hit = r.candidates.find((c) => c.tool === tool && c.method === "npm-global");
+    if (hit) hit.activeInShell = true;
+  }
   return r;
 }
 

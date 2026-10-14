@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { api } from "./api";
 // CodeMirror 体积较大，目录页按需加载
 const CatalogsPage = lazy(() => import("./CatalogsPage"));
-import type { Config, Host, HostState, HostsResponse, ProbeResult, Task, ToolVersionsResponse } from "./types";
+import type { Config, Host, HostState, HostsResponse, PreflightResult, ProbeResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 type ToolId = "codex" | "claude";
 type ThemeMode = "light" | "dark" | "system";
@@ -65,6 +65,7 @@ export default function App() {
   const [view, setView] = useState<"hosts" | "catalogs">("hosts");
   const [versions, setVersions] = useState<ToolVersionsResponse | null>(null);
   const [probeHostId, setProbeHostId] = useState<string | null>(null);
+  const [installTarget, setInstallTarget] = useState<{ host: Host; tool: ToolId } | null>(null);
 
   const refreshHosts = useCallback(async () => {
     try {
@@ -113,7 +114,7 @@ export default function App() {
           next.set(t.id, { ...next.get(t.id), ...t });
           return next;
         });
-        if (t.status !== "running" && ["check", "update", "catalog-push", "probe"].includes(t.action)) refreshHosts();
+        if (t.status !== "running" && ["check", "update", "catalog-push", "probe", "install", "cleanup", "path-repair"].includes(t.action)) refreshHosts();
       }
     };
     return () => es.close();
@@ -289,6 +290,7 @@ export default function App() {
               onRestart={() => runAction(() => api.restartAppServer(h.id))}
               onEdit={() => setEditingHost(h)}
               onProbe={() => runAction(() => api.probeHost(h.id))}
+              onInstall={(tool) => setInstallTarget({ host: h, tool })}
               onShowProbe={() => setProbeHostId(h.id)}
             />
           ))}
@@ -333,8 +335,21 @@ export default function App() {
           }}
         />
       )}
+      {installTarget && (
+        <InstallModal
+          host={installTarget.host}
+          tool={installTarget.tool}
+          config={data.config}
+          versions={versions?.versions}
+          state={data.state[installTarget.host.id] ?? {}}
+          onClose={() => setInstallTarget(null)}
+        />
+      )}
       {probeHostId && data.state[probeHostId]?.probe && (
         <ProbeModal
+          host={data.hosts.find((h) => h.id === probeHostId)!}
+          config={data.config}
+          onAction={() => { setProbeHostId(null); refreshHosts(); }}
           hostName={data.hosts.find((h) => h.id === probeHostId)?.name ?? probeHostId}
           probe={data.state[probeHostId]!.probe!}
           onClose={() => setProbeHostId(null)}
@@ -366,6 +381,7 @@ function HostRow(props: {
   onEdit: () => void;
   onProbe: () => void;
   onShowProbe: () => void;
+  onInstall: (tool: ToolId) => void;
 }) {
   const { host, state, tasks } = props;
   const busy = tasks.length > 0;
@@ -400,6 +416,7 @@ function HostRow(props: {
         extra={
           <>
             <ProbeBadges state={state} tool="codex" onShow={props.onShowProbe} />
+            <button className="link" disabled={!host.enabled || busy} onClick={() => props.onInstall("codex")}>安装/切换</button>
             <button
               className="restart-btn"
             disabled={!host.enabled || busy}
@@ -414,7 +431,7 @@ function HostRow(props: {
         latest={state.latestClaude}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("claude")}
-        extra={<ProbeBadges state={state} tool="claude" onShow={props.onShowProbe} />}
+        extra={<><ProbeBadges state={state} tool="claude" onShow={props.onShowProbe} /><button className="link" disabled={!host.enabled || busy} onClick={() => props.onInstall("claude")}>安装/切换</button></>}
       />
       <td className="actions-cell">
         <div className="action-row">
@@ -506,6 +523,19 @@ function SettingsModal(props: {
   const [proxy, setProxy] = useState(props.config.download?.proxy ?? "");
   const [mirror, setMirror] = useState(props.config.download?.githubMirror ?? "");
   const [token, setToken] = useState(props.config.download?.githubToken ?? "");
+  const [toolsCfg, setToolsCfg] = useState({
+    codex: { method: props.config.tools?.codex?.method ?? "standalone", channel: props.config.tools?.codex?.channel ?? "latest", installDir: props.config.tools?.codex?.installDir ?? "" },
+    claude: { method: props.config.tools?.claude?.method ?? "standalone", channel: props.config.tools?.claude?.channel ?? "stable", installDir: props.config.tools?.claude?.installDir ?? "" }
+  });
+  const [auCfg, setAuCfg] = useState({
+    codex: {
+      startupCheck: props.config.autoUpdate?.codex?.startupCheck ?? false,
+      daemonAutoStart: props.config.autoUpdate?.codex?.daemonAutoStart ?? false,
+      daemonAutoUpdate: props.config.autoUpdate?.codex?.daemonAutoUpdate ?? false,
+      daemonIntervalMinutes: props.config.autoUpdate?.codex?.daemonIntervalMinutes ?? 120
+    },
+    claude: { disableAutoUpdater: props.config.autoUpdate?.claude?.disableAutoUpdater ?? true }
+  });
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -515,7 +545,9 @@ function SettingsModal(props: {
       await api.saveSettings({
         excludePatterns: patterns.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
         versions: { checkIntervalMinutes: Number(intervalMin) || 360 },
-        download: { proxy, githubMirror: mirror, githubToken: token }
+        download: { proxy, githubMirror: mirror, githubToken: token },
+        tools: toolsCfg,
+        autoUpdate: auCfg
       });
       props.onSaved();
     } catch (e) {
@@ -580,6 +612,68 @@ function SettingsModal(props: {
         </label>
       </fieldset>
 
+      <fieldset className="field-group">
+        <legend>默认安装策略（安装目录可在主机「编辑」里按主机覆盖）</legend>
+        {(["codex", "claude"] as const).map((t) => (
+          <div key={t} className="kv" style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+            <strong style={{ width: 90 }}>{t === "codex" ? "Codex CLI" : "Claude Code"}</strong>
+            <label>方式
+              <select value={toolsCfg[t].method} onChange={(e) => setToolsCfg({ ...toolsCfg, [t]: { ...toolsCfg[t], method: e.target.value as "standalone" | "npm" } })}>
+                <option value="standalone">独立二进制</option>
+                <option value="npm">npm（兜底）</option>
+              </select>
+            </label>
+            <label>通道
+              <select
+                value={["latest", "stable", "prerelease"].includes(toolsCfg[t].channel) ? toolsCfg[t].channel : "custom"}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setToolsCfg({ ...toolsCfg, [t]: { ...toolsCfg[t], channel: v === "custom" ? "" : v } });
+                }}
+              >
+                {t === "codex"
+                  ? <><option value="latest">latest（稳定线）</option><option value="prerelease">prerelease（预发布）</option></>
+                  : <><option value="stable">stable（约慢一周）</option><option value="latest">latest</option></>}
+                <option value="custom">自定义版本号…</option>
+              </select>
+            </label>
+            {!["latest", "stable", "prerelease"].includes(toolsCfg[t].channel) && (
+              <input style={{ width: 110 }} placeholder="x.y.z" value={toolsCfg[t].channel}
+                onChange={(e) => setToolsCfg({ ...toolsCfg, [t]: { ...toolsCfg[t], channel: e.target.value.trim() } })} />
+            )}
+            <label>安装目录
+              <input style={{ width: 220 }} value={toolsCfg[t].installDir} placeholder="~/.local/bin"
+                onChange={(e) => setToolsCfg({ ...toolsCfg, [t]: { ...toolsCfg[t], installDir: e.target.value } })} />
+            </label>
+          </div>
+        ))}
+      </fieldset>
+
+      <fieldset className="field-group">
+        <legend>官方自动更新接管（安装独立二进制时写入目标机配置；默认全禁，由 hub 统一更新）</legend>
+        <label className="field inline">
+          <input type="checkbox" checked={auCfg.codex.startupCheck} onChange={(e) => setAuCfg({ ...auCfg, codex: { ...auCfg.codex, startupCheck: e.target.checked } })} />
+          <span>codex 启动时检查更新提示（关闭可避免 TUI 弹窗）</span>
+        </label>
+        <label className="field inline">
+          <input type="checkbox" checked={auCfg.codex.daemonAutoStart} onChange={(e) => setAuCfg({ ...auCfg, codex: { ...auCfg.codex, daemonAutoStart: e.target.checked } })} />
+          <span>codex 交互启动时自动拉起 daemon</span>
+        </label>
+        <label className="field inline">
+          <input type="checkbox" checked={auCfg.codex.daemonAutoUpdate} onChange={(e) => setAuCfg({ ...auCfg, codex: { ...auCfg.codex, daemonAutoUpdate: e.target.checked } })} />
+          <span>codex daemon 自动更新（pid-update-loop）</span>
+        </label>
+        <label className="field">
+          <span>daemon 更新检查间隔（分钟）</span>
+          <input type="number" min={15} value={auCfg.codex.daemonIntervalMinutes}
+            onChange={(e) => setAuCfg({ ...auCfg, codex: { ...auCfg.codex, daemonIntervalMinutes: Number(e.target.value) || 120 } })} />
+        </label>
+        <label className="field inline">
+          <input type="checkbox" checked={auCfg.claude.disableAutoUpdater} onChange={(e) => setAuCfg({ ...auCfg, claude: { disableAutoUpdater: e.target.checked } })} />
+          <span>禁用 claude 后台静默自动更新（DISABLE_AUTOUPDATER=1）</span>
+        </label>
+      </fieldset>
+
       <div className="modal-actions">
         <button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存"}</button>
       </div>
@@ -591,12 +685,13 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
   const [enabled, setEnabled] = useState(props.host.enabled);
   const [prelude, setPrelude] = useState(props.host.prelude);
   const [note, setNote] = useState(props.host.note);
+  const [installDir, setInstallDir] = useState(props.host.installDir ?? "");
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
     setSaving(true);
     try {
-      await api.saveHostOverride(props.host.id, { enabled, prelude, note });
+      await api.saveHostOverride(props.host.id, { enabled, prelude, note, installDir });
       props.onSaved();
     } catch (e) {
       alert((e as Error).message);
@@ -619,6 +714,10 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
         </label>
       )}
       <label className="field">
+        <span>安装目录覆盖（两工具共用；留空用全局默认 ~/.local/bin；例 /mnt/shared/bin）</span>
+        <input value={installDir} onChange={(e) => setInstallDir(e.target.value)} placeholder="~/.local/bin" />
+      </label>
+      <label className="field">
         <span>备注</span>
         <input value={note} onChange={(e) => setNote(e.target.value)} />
       </label>
@@ -634,6 +733,7 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
 const METHOD_LABELS: Record<string, { text: string; cls: string }> = {
   "standalone-official": { text: "独立", cls: "green" },
   "standalone-daemon": { text: "daemon", cls: "green" },
+  "standalone-entry": { text: "独立·入口", cls: "green" },
   "npm-global": { text: "npm", cls: "gray" },
   "npm-local": { text: "npm本地", cls: "gray" },
   "desktop-bundled": { text: "桌面版", cls: "yellow" },
@@ -647,8 +747,8 @@ function VersionBar(props: { versions: ToolVersionsResponse | null; onRefresh: (
   return (
     <div className="version-bar">
       <span className="muted">版本缓存</span>
-      <span>codex {v.codex?.latest ?? "未知"}{v.codex?.stale ? " *" : ""}</span>
-      <span>claude {v.claude?.latest ?? "未知"}{v.claude?.stale ? " *" : ""}</span>
+      <span>codex {v.codex?.latest ?? "未知"}{v.codex?.prerelease ? `（预发布 ${v.codex.prerelease}）` : ""}{v.codex?.stale ? " *" : ""}</span>
+      <span>claude stable {v.claude?.stable ?? "未知"} / latest {v.claude?.latest ?? "未知"}{v.claude?.stale ? " *" : ""}</span>
       <span className="muted">更新于 {ago} · 每 {props.versions.checkIntervalMinutes} 分钟检查</span>
       <button className="link" onClick={props.onRefresh}>立即刷新</button>
     </div>
@@ -661,8 +761,7 @@ function ProbeBadges(props: { state: HostState; tool: ToolId; onShow: () => void
   if (!probe) return null;
   const cands = probe.candidates.filter((c) => c.tool === props.tool);
   if (!cands.length) return null;
-  const activePath = probe.contexts?.shell?.[props.tool];
-  const active = cands.find((c) => c.path === activePath);
+  const active = cands.find((c) => c.activeInShell);
   const m = METHOD_LABELS[active?.method ?? "unknown"];
   return (
     <>
@@ -674,7 +773,7 @@ function ProbeBadges(props: { state: HostState; tool: ToolId; onShow: () => void
 
 const CTX_LABELS: Record<string, string> = { shell: "当前 shell", login: "登录 shell", interactive: "交互 shell" };
 
-function ProbeModal(props: { hostName: string; probe: ProbeResult; onClose: () => void }) {
+function ProbeModal(props: { host: Host; config: Config; onAction: () => void; hostName: string; probe: ProbeResult; onClose: () => void }) {
   const p = props.probe;
   const kv = (label: string, value?: string) =>
     value ? <div><span className="muted">{label}</span> <code>{value}</code></div> : null;
@@ -713,7 +812,7 @@ function ProbeModal(props: { hostName: string; probe: ProbeResult; onClose: () =
                 const m = METHOD_LABELS[c.method] ?? METHOD_LABELS.unknown;
                 return (
                   <tr key={c.path}>
-                    <td>{c.tool}</td>
+                    <td>{c.tool}{c.activeInShell ? " ●" : ""}</td>
                     <td>{c.version || "—"}</td>
                     <td><span className={`badge ${m.cls}`}>{m.text}</span>{c.shared && <span className="badge yellow">共享盘</span>}</td>
                     <td><code>{c.path}</code></td>
@@ -751,6 +850,184 @@ function ProbeModal(props: { hostName: string; probe: ProbeResult; onClose: () =
             <pre className="log small">{p.procs.split(";").filter(Boolean).join("\n")}</pre>
           </>
         )}
+        <div className="modal-actions">
+          {(["codex", "claude"] as const).map((t) => {
+            const hasLib = t === "codex" ? p.pkgRoots.some((r) => r.sub === "standalone") : p.meta.claudeVersionsDir !== "(absent)";
+            return (
+              <button key={t} className="ghost" disabled={!hasLib}
+                title={hasLib ? `清理 ${t} 旧版本（保留 current + 最新 2 个，跳过运行中）` : "无 standalone 版本库"}
+                onClick={() => {
+                  if (confirm(`清理 ${t} 的旧版本？\n保留 current 指向与最新 2 个，跳过正在运行的版本。`)) {
+                    api.cleanupTool(props.host.id, t, 2).then(props.onAction).catch((e) => alert((e as Error).message));
+                  }
+                }}
+              >清理 {t} 旧版本</button>
+            );
+          })}
+          <button className="ghost"
+            title="把安装目录以去重置顶块写入 shell rc（远程）或注册表用户 PATH（本机），含备份"
+            onClick={() => {
+              const dir = props.config.tools.codex.installDir || "~/.local/bin";
+              if (confirm(`PATH 修复：将安装目录（${dir}）去重置顶到 PATH？\n远程写入 ~/.profile 与 shell rc（幂等块，自动备份）；本机写注册表用户 PATH（备份到 data/path-backups/）。\n新开的终端生效。`)) {
+                api.pathRepair(props.host.id, "codex").then(props.onAction).catch((e) => alert((e as Error).message));
+              }
+            }}
+          >PATH 修复（安装目录置顶）</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------- M2：安装/切换弹窗（standalone 默认，含 PATH 预检） ----------
+
+const VERSION_CHANNELS: Record<ToolId, { value: string; label: string }[]> = {
+  codex: [
+    { value: "latest", label: "latest（稳定线）" },
+    { value: "prerelease", label: "prerelease（预发布）" }
+  ],
+  claude: [
+    { value: "stable", label: "stable（约慢一周）" },
+    { value: "latest", label: "latest" }
+  ]
+};
+
+function InstallModal(props: {
+  host: Host;
+  tool: ToolId;
+  config: Config;
+  versions: ToolVersions | undefined;
+  state: HostState;
+  onClose: () => void;
+}) {
+  const { host, tool } = props;
+  const toolCfg = props.config.tools?.[tool];
+  const [method, setMethod] = useState<"standalone" | "npm">(toolCfg?.method ?? "standalone");
+  const [channel, setChannel] = useState(toolCfg?.channel || (tool === "claude" ? "stable" : "latest"));
+  const [customVersion, setCustomVersion] = useState("");
+  const [installDir, setInstallDir] = useState(host.installDir || toolCfg?.installDir || "~/.local/bin");
+  const [pf, setPf] = useState<PreflightResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const versionSpec = channel === "custom" ? customVersion.trim() : channel;
+  const v = props.versions;
+  const resolvedHint = (() => {
+    if (channel === "custom") return customVersion.trim() || "（未填）";
+    if (tool === "codex") {
+      if (channel === "latest") return v?.codex?.latest ? v.codex.latest : "未知（先刷新版本缓存）";
+      if (channel === "prerelease") return v?.codex?.prerelease ?? "未知";
+    } else {
+      if (channel === "stable") return v?.claude?.stable ?? "未知";
+      if (channel === "latest") return v?.claude?.latest ?? "未知";
+    }
+    return "";
+  })();
+
+  const active = props.state.probe?.contexts?.shell?.[tool] ?? "";
+
+  const doPreflight = async () => {
+    setBusy(true);
+    try {
+      setPf(await api.preflight(host.id, tool, installDir));
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const install = async () => {
+    if (method === "standalone" && !versionSpec) return alert("请选择版本通道或填写版本号");
+    if (method === "standalone" && channel === "custom" && !/^\d+\.\d+\.\d+(-(alpha|beta)[\d.]*)?$/.test(customVersion.trim()))
+      return alert("版本号格式不正确（x.y.z 或 x.y.z-alpha.N）");
+    if (pf?.status === "not-on-path") {
+      if (!confirm(`警告：${pf.installDir} 不在 PATH 中，安装后无法直接调用。${"\n"}可先在探测详情里做「PATH 修复」。仍要继续安装吗？`)) return;
+    } else if (pf?.status === "shadowed") {
+      const list = pf.shadowedBy!.map((x) => `#${x.index} ${x.dir}（${x.version || "版本未知"}）`).join("\n");
+      if (!confirm(`警告：以下 PATH 条目排在安装目录之前且含同名程序，新安装会被遮蔽：\n${list}\n\n仍要继续安装吗？`)) return;
+    }
+    if (pf?.sharedWarning && !confirm(`共享挂载警告：${pf.sharedWarning}\n\n仍要继续吗？`)) return;
+    setBusy(true);
+    try {
+      await api.installTool(host.id, {
+        tool,
+        method,
+        version: method === "standalone" ? versionSpec : undefined,
+        installDir: method === "standalone" ? installDir : undefined
+      });
+      props.onClose();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={`安装/切换：${host.name} · ${tool === "codex" ? "Codex CLI" : "Claude Code"}`} onClose={props.onClose}>
+      {active && <p className="kv muted">当前生效：<code>{active}</code></p>}
+      <div className="kv" style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <label>方式
+          <select value={method} onChange={(e) => setMethod(e.target.value as "standalone" | "npm")}>
+            <option value="standalone">独立二进制（推荐）</option>
+            <option value="npm">npm（兜底）</option>
+          </select>
+        </label>
+        {method === "standalone" && (
+          <>
+            <label>版本
+              <select value={channel} onChange={(e) => setChannel(e.target.value)}>
+                {VERSION_CHANNELS[tool].map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                <option value="custom">自定义版本号…</option>
+              </select>
+            </label>
+            {channel === "custom" && (
+              <input style={{ width: 130 }} placeholder="x.y.z" value={customVersion} onChange={(e) => setCustomVersion(e.target.value)} />
+            )}
+            <span className="muted">→ {resolvedHint}</span>
+          </>
+        )}
+      </div>
+      {method === "standalone" && (
+        <>
+          <label className="field">
+            <span>安装目录（入口链接位置；版本库固定在官方目录）</span>
+            <input value={installDir} onChange={(e) => { setInstallDir(e.target.value); setPf(null); }} placeholder="~/.local/bin" />
+          </label>
+          <div className="kv">
+            <button className="ghost" onClick={doPreflight} disabled={busy}>{busy ? "检查中…" : "PATH 预检"}</button>
+            {pf && (
+              <div style={{ marginTop: 6 }}>
+                {pf.status === "need-probe" && <span className="badge yellow">{pf.reason}</span>}
+                {pf.status === "not-on-path" && <span className="badge red">不在 PATH：{pf.reason}</span>}
+                {pf.status === "ok" && <span className="badge green">PATH 第 {pf.position}/{pf.totalEntries} 位，无遮蔽</span>}
+                {pf.status === "shadowed" && <span className="badge yellow">被遮蔽（{CTX_LABELS[pf.shadowedContext ?? ""] ?? pf.shadowedContext}）</span>}
+                {pf.status === "shadowed" && pf.shadowedBy!.length > 0 && (
+                  <ul style={{ margin: "4px 0", paddingLeft: 18 }}>
+                    {pf.shadowedBy!.map((x) => <li key={x.dir}><code>#{x.index} {x.dir}</code>（{x.version || "版本未知"}）</li>)}
+                  </ul>
+                )}
+                {pf.contexts && pf.contexts.length > 0 && (
+                  <div className="kv muted" style={{ marginTop: 4 }}>
+                    {pf.contexts.map((c) => (
+                      <div key={c.name}>
+                        {CTX_LABELS[c.name] ?? c.name}：
+                        {c.position < 0 ? "不在 PATH" : `PATH 第 ${c.position}/${c.total} 位`}
+                        {c.resolved ? `，生效 → ${c.resolved}` : ""}
+                        {c.shadowedBy.length > 0 ? "（遮蔽）" : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {pf.sharedWarning && <div className="badge yellow" style={{ marginTop: 4 }}>{pf.sharedWarning}</div>}
+              </div>
+            )}
+          </div>
+          <p className="muted kv">安装后由 hub 接管官方自动更新（当前默认：全部禁用，含 codex 启动提示与 claude 后台静默更新；在设置页可调整）。固定版本号时 claude 会写入 minimumVersion 防止漂移。</p>
+        </>
+      )}
+      <div className="modal-actions">
+        <button onClick={install} disabled={busy}>{busy ? "提交中…" : "开始安装"}</button>
       </div>
     </Modal>
   );

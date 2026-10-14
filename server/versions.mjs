@@ -40,21 +40,30 @@ export function curlText(url, { proxy = "", headers = [], timeoutSec = 30 } = {}
 }
 
 /** atom feed：过滤 alpha/beta 预发布，取首个稳定版 */
-function latestStableFromAtom(xml) {
+function parseAtom(xml) {
   const titles = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].map((m) => m[1].trim());
+  let stable = "";
+  let prerelease = "";
   for (const t of titles) {
-    const m = /^(?:rust-v)?(\d+\.\d+\.\d+)$/.exec(t);
-    if (m) return m[1];
+    if (!stable) {
+      const m = /^(?:rust-v)?(\d+\.\d+\.\d+)$/.exec(t);
+      if (m) { stable = m[1]; continue; }
+    }
+    if (!prerelease) {
+      const m = /^(?:rust-v)?(\d+\.\d+\.\d+-(?:alpha|beta)[\d.]*)$/.exec(t);
+      if (m) prerelease = m[1];
+    }
+    if (stable && prerelease) break;
   }
-  return "";
+  return { stable, prerelease };
 }
 
 async function fetchCodexLatest(proxy, token) {
   // ① atom feed（无需鉴权，不易限流）
   try {
     const xml = await curlText(CODEX_ATOM, { proxy, timeoutSec: 20 });
-    const v = latestStableFromAtom(xml);
-    if (v) return { latest: v, source: "github-atom" };
+    const { stable, prerelease } = parseAtom(xml);
+    if (stable) return { latest: stable, prerelease, source: "github-atom" };
   } catch {
     /* 继续降级 */
   }

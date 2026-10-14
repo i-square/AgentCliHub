@@ -25,7 +25,8 @@ export function buildHostList(config) {
       ...h,
       enabled: o.enabled ?? true,
       prelude: o.prelude ?? "",
-      note: o.note ?? ""
+      note: o.note ?? "",
+      installDir: o.installDir ?? ""
     };
   });
 }
