@@ -30,11 +30,32 @@ export interface HostState {
   catalogPushedAt?: string;
 }
 
+export interface CatalogSources {
+  glm: { url: string };
+  kimi: { url: string };
+  deepseek: { url: string };
+  ccswitch: { url: string };
+}
+
 export interface CatalogSettings {
   sourceUrl: string;
   targetPath: string;
   forceResponsesLiteFalse: boolean;
   priorities: Record<string, [number, number]>;
+  sources: CatalogSources;
+}
+
+export interface CatalogKeyInfo {
+  configured: boolean;
+  preview: string;
+}
+
+export interface PullOfficialResult {
+  ok: boolean;
+  file: CatalogFileInfo;
+  channel: "official" | "ccswitch";
+  note: string;
+  models: string[];
 }
 
 export interface Config {

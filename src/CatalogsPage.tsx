@@ -5,6 +5,7 @@ import { linter, lintGutter } from "@codemirror/lint";
 import { api } from "./api";
 import type {
   CatalogFileInfo,
+  CatalogKeyInfo,
   CatalogSettings,
   Config,
   Host,
@@ -26,6 +27,9 @@ function useEffectiveTheme(): "light" | "dark" {
   }, []);
   return theme;
 }
+
+// 有官方拉取通道的厂商（对应 models.<key>.json）
+const OFFICIAL_VENDORS = ["glm", "kimi", "deepseek"] as const;
 
 // ----- 与 server/tools.mjs 的 catalogReadiness 保持一致的轻量副本（前端仅用于展示与禁用） -----
 function normalizePath(p: string, home: string, ci: boolean): string {
@@ -73,10 +77,14 @@ export default function CatalogsPage(props: {
   const [savedContent, setSavedContent] = useState("");
   const [busy, setBusy] = useState("");
   const [newKey, setNewKey] = useState("");
-  const [startInputs, setStartInputs] = useState<Record<string, string>>({});
+  const [bandDrafts, setBandDrafts] = useState<Record<string, string>>({});
+  // 每个 catalog 文件的官方拉取状态：idle(不渲染标记) / pulling(转圈) / ok / fail
+  const [pullState, setPullState] = useState<Record<string, { phase: "pulling" | "ok" | "fail"; text: string }>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [restartAfter, setRestartAfter] = useState(true);
   const [pushBusy, setPushBusy] = useState(false);
+  const [keysInfo, setKeysInfo] = useState<Record<string, CatalogKeyInfo>>({});
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
   const editorRef = useRef<{ name: string } | null>(null);
 
   const dirty = activeName !== null && content !== savedContent;
@@ -87,6 +95,11 @@ export default function CatalogsPage(props: {
     setFiles(data.files);
     setSettings(data.settings);
     setSavedSettings(data.settings);
+  }, []);
+
+  const loadKeys = useCallback(async () => {
+    const data = await api.getCatalogKeys();
+    setKeysInfo(data.keys);
   }, []);
 
   const loadMerged = useCallback(async () => {
@@ -102,7 +115,8 @@ export default function CatalogsPage(props: {
   useEffect(() => {
     loadFiles().catch((e) => alert((e as Error).message));
     loadMerged().catch(() => {});
-  }, [loadFiles, loadMerged]);
+    loadKeys().catch(() => {});
+  }, [loadFiles, loadMerged, loadKeys]);
 
   const openFile = useCallback(async (name: string) => {
     if (dirty && !window.confirm("当前文件有未保存的修改，切换后将丢失，继续？")) return;
@@ -162,6 +176,69 @@ export default function CatalogsPage(props: {
       }
     });
 
+  /** 官方源拉取（不弹窗）：行内图标转圈 → ✅/❌ 标记，明细放 title 提示 */
+  const runPull = <T,>(name: string, fn: () => Promise<T>, okText: (r: T) => string) => {
+    setPullState((prev) => ({ ...prev, [name]: { phase: "pulling", text: "" } }));
+    (async () => {
+      try {
+        const r = await fn();
+        await loadFiles();
+        await loadMerged();
+        if (activeName === name) {
+          const data = await api.getCatalog(name);
+          setContent(data.content);
+          setSavedContent(data.content);
+        }
+        setPullState((prev) => ({ ...prev, [name]: { phase: "ok", text: okText(r) } }));
+      } catch (e) {
+        setPullState((prev) => ({ ...prev, [name]: { phase: "fail", text: (e as Error).message } }));
+      }
+    })();
+  };
+
+  const pullOfficial = (vendor: string) => {
+    const name = `models.${vendor}.json`;
+    runPull(
+      name,
+      () => api.pullOfficial(name, "auto"),
+      (r) => `${r.channel === "official" ? "官方" : "备用"} · ${r.models.join("、")}${r.note ? `（${r.note}）` : ""}`
+    );
+  };
+
+  /** 备用通道（CC Switch 社区预设源，人工维护、可能滞后于官方） */
+  const pullBackup = (vendor: string) => {
+    const name = `models.${vendor}.json`;
+    runPull(
+      name,
+      () => api.pullOfficial(name, "ccswitch"),
+      (r) => `备用 · ${r.models.join("、")}${r.note ? `（${r.note}）` : ""}`
+    );
+  };
+
+  /** 一键拉取全部：OAI 官方 catalog + 三家厂商（官方优先，失败自动回落备用源） */
+  const pullAll = () => {
+    void runPull("models.oai.json", () => api.refreshOai(), () => "已更新");
+    OFFICIAL_VENDORS.forEach((v) => pullOfficial(v));
+  };
+  const pullAllBusy = Object.values(pullState).some((s) => s.phase === "pulling");
+
+  const saveKey = (vendor: string) =>
+    run("keys", async () => {
+      const v = (keyInputs[vendor] ?? "").trim();
+      if (!v) return;
+      const data = await api.saveCatalogKeys({ [vendor]: v });
+      setKeysInfo(data.keys);
+      setKeyInputs((prev) => ({ ...prev, [vendor]: "" }));
+    });
+
+  const clearKey = (vendor: string) => {
+    if (!window.confirm(`确定清除 ${vendor} 的 API Key？`)) return;
+    run("keys", async () => {
+      const data = await api.saveCatalogKeys({ [vendor]: null });
+      setKeysInfo(data.keys);
+    });
+  };
+
   const removeFile = (name: string) => {
     if (!window.confirm(`确定删除 ${name}？（同目录会保留 .bak 备份的情况以服务器为准）`)) return;
     run("del", async () => {
@@ -176,8 +253,10 @@ export default function CatalogsPage(props: {
 
   const renumber = (name: string) =>
     run("renumber", async () => {
-      const start = Number(startInputs[name]);
+      const start = Number(bandDrafts[name]);
+      if (!Number.isInteger(start) || start < 0) return;
       await api.renumberCatalog(name, start);
+      setBandDrafts((prev) => ({ ...prev, [name]: "" }));
       if (activeName === name) {
         const data = await api.getCatalog(name);
         setContent(data.content);
@@ -260,10 +339,47 @@ export default function CatalogsPage(props: {
         </button>
       </section>
 
+      {/* ===== 厂商 API Key（仅本机保存，已被 gitignore） ===== */}
+      <section className="panel catalog-keys">
+        <div className="keys-head">
+          <h3>厂商 API Key</h3>
+          <span className="muted">
+            仅保存到本机 data/catalog-keys.json（不提交 git），供「官方拉取」通道使用；不配置则自动回落 CC Switch 社区源。DeepSeek 目录托管在公开 CDN，无需 Key。
+          </span>
+        </div>
+        {(["glm", "kimi"] as const).map((v) => (
+          <div className="key-row" key={v}>
+            <span className="key-label">{v === "glm" ? "GLM（智谱）" : "Kimi"}</span>
+            <input
+              type="password"
+              autoComplete="off"
+              placeholder={keysInfo[v]?.configured ? `已配置 ${keysInfo[v].preview}（输入新 key 覆盖）` : "未配置"}
+              value={keyInputs[v] ?? ""}
+              onChange={(e) => setKeyInputs({ ...keyInputs, [v]: e.target.value })}
+            />
+            <button disabled={!(keyInputs[v] ?? "").trim() || busy === "keys"} onClick={() => saveKey(v)}>
+              {busy === "keys" ? "保存中…" : "保存"}
+            </button>
+            <button className="ghost danger" disabled={!keysInfo[v]?.configured || busy === "keys"} onClick={() => clearKey(v)}>
+              清除
+            </button>
+          </div>
+        ))}
+      </section>
+
       <div className="catalog-main">
         {/* ===== 文件列表 ===== */}
         <section className="panel catalog-files">
-          <h3>catalog 文件</h3>
+          <div className="files-head">
+            <h3>catalog 文件</h3>
+            <button
+              disabled={pullAllBusy}
+              onClick={pullAll}
+              title="一键拉取：OAI 官方 catalog + glm / kimi / deepseek 官方源（官方优先，失败自动回落 CC Switch 备用源），结果在各自行内标记"
+            >
+              {pullAllBusy ? "拉取中…" : "一键拉取全部"}
+            </button>
+          </div>
           {files.length === 0 && (
             <p className="muted">暂无文件。点击 models.oai.json 行的「重新下载」获取官方 catalog，或新建自定义文件。</p>
           )}
@@ -272,8 +388,11 @@ export default function CatalogsPage(props: {
               {files.map((f) => {
                 const rangeText =
                   f.priorityMin === null ? "—" : `${f.priorityMin}~${f.priorityMax}`;
-                const configured = settings.priorities[f.key]?.[0];
+                const st = pullState[f.name];
+                const isVendorFile = (OFFICIAL_VENDORS as readonly string[]).includes(f.key);
+                const pullIcon = !st || st.phase === "pulling" ? "🔄" : st.phase === "ok" ? "✅" : "❌";
                 return (
+
                   <tr key={f.name} className={f.name === activeName ? "active" : ""}>
                     <td>
                       <div className="file-head">
@@ -284,8 +403,53 @@ export default function CatalogsPage(props: {
                         {!f.valid && <span className="tag off" title={f.error}>无效</span>}
                       </div>
                       <div className="file-meta">
-                        {f.modelCount} 个模型 · 优先级 {rangeText} ·{" "}
-                        {new Date(f.updatedAt).toLocaleString()}
+                        <span>
+                          {f.modelCount} 个模型 · 优先级 {rangeText} ·{" "}
+                          {new Date(f.updatedAt).toLocaleString()}
+                        </span>
+                        {isVendorFile && (
+                          <span className="file-pull">
+                            <button
+                              className={`icon-pull ${st?.phase === "pulling" ? "spinning" : ""}`}
+                              title={
+                                st?.phase === "fail"
+                                  ? `拉取失败：${st.text}`
+                                  : st?.phase === "ok"
+                                    ? `拉取成功：${st.text}`
+                                    : `从官方源拉取并覆盖 ${f.name}（未配置 API Key 时自动回落 CC Switch 社区源）`
+                              }
+                              disabled={st?.phase === "pulling"}
+                              onClick={() => pullOfficial(f.key)}
+                            >
+                              {pullIcon}
+                            </button>
+                            <button
+                              className={`icon-pull ${st?.phase === "pulling" ? "spinning" : ""}`}
+                              title="备用通道：从 CC Switch 社区预设源拉取并覆盖（人工维护、可能滞后于官方）"
+                              disabled={st?.phase === "pulling"}
+                              onClick={() => pullBackup(f.key)}
+                            >
+                              🔀
+                            </button>
+                            {st && st.phase !== "pulling" && (
+                              <span className={`pull-note ${st.phase}`} title={st.text}>
+                                {st.phase === "ok" ? st.text.split(" · ")[0] : "失败"}
+                              </span>
+                            )}
+                          </span>
+                        )}
+                        {/* 非厂商行（如一键拉取时的 models.oai.json）：只显示状态标记 */}
+                        {!isVendorFile && st && (
+                          <span className="file-pull">
+                            {st.phase === "pulling" ? (
+                              <span className="icon-pull spinning">🔄</span>
+                            ) : (
+                              <span className={`pull-note ${st.phase}`} title={st.text}>
+                                {st.phase === "ok" ? `✅ ${st.text}` : "❌ 失败"}
+                              </span>
+                            )}
+                          </span>
+                        )}
                       </div>
                       <div className="file-actions">
                         {f.isBuiltin ? (
@@ -293,24 +457,7 @@ export default function CatalogsPage(props: {
                             {busy === "oai" ? "下载中…" : "重新下载"}
                           </button>
                         ) : (
-                          <>
-                            <input
-                              className="start-input"
-                              type="number"
-                              min={0}
-                              placeholder="起点"
-                              title="优先级重排起点：按当前顺序从该值开始顺次编号"
-                              value={startInputs[f.name] ?? configured ?? f.priorityMin ?? 0}
-                              onChange={(e) => setStartInputs({ ...startInputs, [f.name]: e.target.value })}
-                            />
-                            <button
-                              className="ghost"
-                              disabled={busy === "renumber" || !f.valid}
-                              onClick={() => renumber(f.name)}
-                              title="按 (priority, slug) 排序后从起点顺次重写 priority"
-                            >重排</button>
-                            <button className="ghost danger" onClick={() => removeFile(f.name)}>删除</button>
-                          </>
+                          <button className="ghost danger" onClick={() => removeFile(f.name)}>删除</button>
                         )}
                       </div>
                     </td>
@@ -319,6 +466,7 @@ export default function CatalogsPage(props: {
               })}
             </tbody>
           </table>
+
           <div className="new-file">
             <input
               placeholder="新 catalog 名（如 groq）"
@@ -335,6 +483,36 @@ export default function CatalogsPage(props: {
                 })
               }
             >新建</button>
+          </div>
+
+          {/* ===== priority 分段（留空 = 不重排） ===== */}
+          <div className="catalog-bands">
+            <h4>priority 分段（留空 = 不重排）</h4>
+            {files.map((f) => {
+              const configured = settings.priorities[f.key]?.[0];
+              const draft = bandDrafts[f.name] ?? "";
+              return (
+                <div className="band-row" key={f.name}>
+                  <span className="band-name">{f.name}</span>
+                  <span className="band-range">
+                    {f.priorityMin === null ? "—" : `${f.priorityMin}~${f.priorityMax}`}
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    placeholder={configured !== undefined ? String(configured) : "起点"}
+                    value={draft}
+                    onChange={(e) => setBandDrafts({ ...bandDrafts, [f.name]: e.target.value })}
+                  />
+                  <button
+                    className="ghost"
+                    disabled={busy === "renumber" || !f.valid || draft.trim() === ""}
+                    onClick={() => renumber(f.name)}
+                    title="按 (priority, slug) 排序后从起点顺次重写 priority"
+                  >应用</button>
+                </div>
+              );
+            })}
           </div>
         </section>
 

@@ -10,6 +10,7 @@ import {
   OAI_NAME,
   listCatalogs,
   readCatalogText,
+  parseCatalogText,
   writeCatalog,
   createCatalog,
   deleteCatalog,
@@ -21,6 +22,7 @@ import {
   isValidName,
   catalogKey
 } from "./catalogs.mjs";
+import { VENDOR_KEYS, maskKeys, saveCatalogKeys, pullVendorCatalog } from "./catalogSources.mjs";
 import { TaskManager } from "./tasks.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
@@ -149,6 +151,53 @@ app.post("/api/catalogs/oai/refresh", async (req, res) => {
   }
 });
 
+// ---------- 厂商官方/备用源拉取 ----------
+
+app.get("/api/catalog-keys", (req, res) => {
+  res.json({ keys: maskKeys() });
+});
+
+app.put("/api/catalog-keys", wrap((req, res) => {
+  res.json({ ok: true, keys: saveCatalogKeys(req.body ?? {}) });
+}));
+
+
+// 从厂商官方源拉取 catalog 并覆盖写入（写入后按优先级分段起点重排）。
+// body.channel: "auto"（默认，官方优先、失败回落 CC Switch）| "official" | "ccswitch"
+app.post("/api/catalogs/:name/pull-official", async (req, res) => {
+  try {
+    const name = req.params.name;
+    const key = catalogKey(name);
+    if (!key || !VENDOR_KEYS.includes(key)) {
+      return res.status(400).json({ error: `catalog ${name} 没有厂商拉取通道（仅支持 ${VENDOR_KEYS.join("/")}）` });
+    }
+    const channel = ["auto", "official", "ccswitch"].includes(req.body?.channel) ? req.body.channel : "auto";
+    const config = loadConfig();
+    // Kimi 映射需要现有条目来保留展示文案；文件不存在时按空处理
+    let existingModels = [];
+    try {
+      existingModels = parseCatalogText(readCatalogText(name)).models;
+    } catch { /* 文件不存在或无效时使用空模板 */ }
+    const result = await pullVendorCatalog(key, {
+      channel,
+      sources: config.catalog.sources,
+      existingModels
+    });
+    const file = writeCatalog(name, JSON.stringify(result.catalog));
+    // 按该厂商优先级分段起点重排，避免覆盖厂商原始 priority 后与合并分段冲突
+    const bandStart = config.catalog.priorities[key]?.[0];
+    const finalFile = Number.isInteger(bandStart) ? renumber(name, bandStart) : file;
+    res.json({
+      ok: true,
+      file: finalFile,
+      channel: result.channel,
+      note: result.note,
+      models: result.catalog.models.map((m) => m.slug)
+    });
+  } catch (err) {
+    res.status(502).json({ error: `拉取失败：${err.message}` });
+  }
+});
 app.post("/api/catalogs/:name/renumber", wrap((req, res) => {
   const start = Number(req.body?.start);
   if (!Number.isInteger(start) || start < 0) return res.status(400).json({ error: "start 必须是非负整数" });

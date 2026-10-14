@@ -29,6 +29,10 @@ id_rsa*
 # Local scratch (copied reference files, may contain secrets)
 tmp/
 
+# 官方源参考快照（本地留存，不入库）
+catalogs/
+
+
 
 # Serena 符号索引缓存
 .serena/

@@ -27,7 +27,16 @@ const DEFAULT_CONFIG = {
     sourceUrl: "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json",
     targetPath: "~/.codex/models.json",
     forceResponsesLiteFalse: true,
-    priorities: { oai: [0, 100], glm: [100, 200], kimi: [200, 300], deepseek: [300, 400] }
+    priorities: { oai: [0, 100], glm: [100, 200], kimi: [200, 300], deepseek: [300, 400] },
+    // 厂商官方拉取源（glm/kimi 需配合 data/catalog-keys.json 中的 API Key）与 CC Switch 备用源
+    sources: {
+      glm: { url: "https://open.bigmodel.cn/api/v1/models" },
+      kimi: { url: "https://api.kimi.com/coding/v1/models" },
+      deepseek: { url: "https://cdn.deepseek.com/api-docs/codex-deepseek-setup.sh" },
+      ccswitch: {
+        url: "https://raw.githubusercontent.com/farion1231/cc-switch/main/src/config/codexProviderPresets.ts"
+      }
+    }
   }
 };
 
@@ -56,7 +65,15 @@ export function loadConfig() {
     catalog: {
       ...defaults.catalog,
       ...(raw.catalog ?? {}),
-      priorities: { ...defaults.catalog.priorities, ...(raw.catalog?.priorities ?? {}) }
+      priorities: { ...defaults.catalog.priorities, ...(raw.catalog?.priorities ?? {}) },
+      sources: {
+        ...defaults.catalog.sources,
+        ...(raw.catalog?.sources ?? {}),
+        glm: { ...defaults.catalog.sources.glm, ...(raw.catalog?.sources?.glm ?? {}) },
+        kimi: { ...defaults.catalog.sources.kimi, ...(raw.catalog?.sources?.kimi ?? {}) },
+        deepseek: { ...defaults.catalog.sources.deepseek, ...(raw.catalog?.sources?.deepseek ?? {}) },
+        ccswitch: { ...defaults.catalog.sources.ccswitch, ...(raw.catalog?.sources?.ccswitch ?? {}) }
+      }
     }
   };
 }

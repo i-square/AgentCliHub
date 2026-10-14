@@ -1,4 +1,4 @@
-import type { CatalogsResponse, Config, HostsResponse, MergedInfo, Task } from "./types";
+import type { CatalogKeyInfo, CatalogsResponse, Config, HostsResponse, MergedInfo, PullOfficialResult, Task } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -54,6 +54,15 @@ export const api = {
   refreshOai: () => req<{ ok: true }>("/api/catalogs/oai/refresh", { method: "POST" }),
   renumberCatalog: (name: string, start: number) =>
     req<{ ok: true }>(`/api/catalogs/${encodeURIComponent(name)}/renumber`, json({ start })),
+  pullOfficial: (name: string, channel: "auto" | "official" | "ccswitch" = "auto") =>
+    req<PullOfficialResult>(`/api/catalogs/${encodeURIComponent(name)}/pull-official`, json({ channel })),
+  getCatalogKeys: () => req<{ keys: Record<string, CatalogKeyInfo> }>("/api/catalog-keys"),
+  saveCatalogKeys: (keys: Record<string, string | null>) =>
+    req<{ ok: true; keys: Record<string, CatalogKeyInfo> }>("/api/catalog-keys", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(keys)
+    }),
   pushCatalog: (id: string, restart: boolean) =>
     req<{ taskId: string }>(`/api/hosts/${id}/catalog-push`, json({ restart }))
 };
