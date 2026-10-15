@@ -26,7 +26,7 @@ import { VENDOR_KEYS, maskKeys, saveCatalogKeys, pullVendorCatalog } from "./cat
 import { TaskManager } from "./tasks.mjs";
 import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
-import { installTool, preflight, resolveToolConfig, resolveVersionSpec, isValidVersionSpec } from "./install.mjs";
+import { installTool, preflight, resolveToolConfig, resolveVersionSpec, isValidVersionSpec, applyAutoUpdate } from "./install.mjs";
 import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
@@ -334,12 +334,55 @@ app.post("/api/hosts/:id/preflight", (req, res) => {
 app.post("/api/hosts/:id/install", (req, res) => {
   const tool = req.body?.tool;
   if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
-  const { method, version, installDir } = req.body ?? {};
+  const { method, version, installDir, force } = req.body ?? {};
   if (!isValidVersionSpec(tool, version)) return res.status(400).json({ error: `非法的版本号: ${String(version).slice(0, 40)}` });
   if (installDir !== undefined && typeof installDir !== "string") return res.status(400).json({ error: "installDir 必须是字符串" });
   startTask(req, res, "install", `安装 ${TOOLS[tool].label}`, async (host, onData) => {
-    return await installTool(host, tool, { config: loadConfig(), method, version, installDir }, onData);
+    return await installTool(host, tool, { config: loadConfig(), method, version, installDir, force: force === true }, onData);
   });
+});
+
+/** 立即应用官方自动更新设置到一台主机（tools 缺省 = codex + claude），完成后重新探测刷新快照 */
+async function runAutoUpdate(host, tools, onData) {
+  const config = loadConfig();
+  const parts = [];
+  for (const tool of tools) parts.push(await applyAutoUpdate(host, tool, config, onData));
+  try {
+    const probe = await probeHost(host, () => {});
+    const st = loadState();
+    st.hosts[host.id] = { ...st.hosts[host.id], probe };
+    saveState(st);
+  } catch (e) {
+    onData(`[warn] 重新探测失败（不影响已写入的配置）：${e.message}\n`);
+  }
+  return parts.join("；");
+}
+
+app.post("/api/hosts/:id/auto-update", (req, res) => {
+  const tool = req.body?.tool;
+  if (tool !== undefined && !TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  startTask(req, res, "auto-update", "应用官方自动更新设置", (host, onData) => runAutoUpdate(host, tool ? [tool] : ["codex", "claude"], onData));
+});
+
+// 全部主机：对所有已启用主机并行发起（同一主机内仍与其他写操作串行）
+app.post("/api/auto-update-all", (req, res) => {
+  const hosts = buildHostList(loadConfig()).filter((h) => h.enabled);
+  const ids = [];
+  for (const host of hosts) {
+    const task = tasks.create({ hostId: host.id, action: "auto-update", label: `${host.name} · 应用官方自动更新设置` });
+    ids.push(task.id);
+    const onData = (c) => tasks.append(task.id, c);
+    (async () => {
+      try {
+        const result = await tasks.withHostLock(host.id, () => onData("[queue] 该主机有其他写操作进行中，已排队等待…\n"), () => runAutoUpdate(host, ["codex", "claude"], onData));
+        tasks.finish(task.id, true, result);
+      } catch (err) {
+        onData(`\n[error] ${err.message}\n`);
+        tasks.finish(task.id, false, err.message);
+      }
+    })();
+  }
+  res.json({ taskIds: ids });
 });
 
 app.post("/api/hosts/:id/cleanup", (req, res) => {
@@ -397,7 +440,7 @@ app.get("/api/tasks/:id", (req, res) => {
 });
 
 /** 同一主机上必须串行的写操作（共用暂存目录 / current 链接 / 配置文件） */
-const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair"]);
+const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair", "auto-update"]);
 
 /** 启动一个后台任务并立即返回任务 id */
 function startTask(req, res, action, label, run) {

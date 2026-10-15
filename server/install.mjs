@@ -487,44 +487,57 @@ export function editClaudeSettings(text, { disableAutoUpdater, channel, minimumV
   return JSON.stringify(j, null, 2) + "\n";
 }
 
+/**
+ * 接管官方自动更新：把设置里的开关写入目标机的 codex / claude 配置（与安装方式无关，npm 版同样适用）。
+ * 幂等：内容已匹配就不写；读取失败或无法安全改写则跳过并告警。
+ * @returns {Promise<{changed: boolean, warned: boolean}>}
+ */
 async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", channel = "" } = {}, onData = () => {}) {
   const au = config.autoUpdate?.[tool] ?? {};
+  let changed = false;
+  let warned = false;
+  const warn = (msg) => {
+    warned = true;
+    onData(`[warn] ${msg}\n`);
+  };
   /** 读-改-写一个配置文件；读取失败（error）一律跳过并告警，绝不按空文件覆盖 */
-  const edit = async (label, localPath, remoteExpr, editFn, { allowCreate = true } = {}) => {
+  const edit = async (label, localPath, remoteExpr, editFn) => {
     const cur = await readConfigFile(host, localPath, remoteExpr);
     if (cur.state === "error") {
-      onData(`[warn] 读取 ${label} 失败，已跳过接管（未写入，避免覆盖原有配置）：${cur.reason ?? "本机读取异常"}\n`);
-      return null;
+      warn(`读取 ${label} 失败，已跳过接管（未写入，避免覆盖原有配置）：${cur.reason ?? "本机读取异常"}`);
+      return false;
     }
-    if (cur.state === "missing" && !allowCreate) return { skipped: true };
     const old = cur.state === "ok" ? cur.content : "";
     let next;
     try {
       next = editFn(old);
     } catch (e) {
-      onData(`[warn] ${label} 无法安全改写，已跳过接管：${e.message}\n`);
-      return null;
+      warn(`${label} 无法安全改写，已跳过接管：${e.message}`);
+      return false;
     }
-    if (next === old) return { changed: false };
+    if (next === old) {
+      onData(`${label} 已匹配设置，无需修改\n`);
+      return false;
+    }
     await writeConfigFile(host, localPath, remoteExpr, next, onData);
-    return { changed: true };
+    changed = true;
+    return true;
   };
 
   if (tool === "codex") {
-    const r1 = await edit(
+    if (await edit(
       "config.toml",
       expandHomeLocal("~/.codex/config.toml"),
       remotePathExpr("~/.codex/config.toml"),
       (old) => editCodexConfigToml(old, au, (m) => onData(`[warn] ${m}`))
-    );
-    if (r1?.changed) onData(`已接管 config.toml：check_for_update_on_startup=${au.startupCheck}，daemon_auto_start=${au.daemonAutoStart}\n`);
+    )) onData(`已接管 config.toml：check_for_update_on_startup=${au.startupCheck}，daemon_auto_start=${au.daemonAutoStart}\n`);
 
     // daemon 设置：文件存在，或 daemon 目录已存在（settings.json 缺省即官方默认开启）时才改写；无 daemon 的主机不新建
     const localDs = expandHomeLocal("~/.codex/app-server-daemon/settings.json");
     const dsExpr = remotePathExpr("~/.codex/app-server-daemon/settings.json");
     const cur = await readConfigFile(host, localDs, dsExpr);
     if (cur.state === "error") {
-      onData(`[warn] 读取 daemon settings.json 失败，已跳过接管（未写入）：${cur.reason ?? "本机读取异常"}\n`);
+      warn(`读取 daemon settings.json 失败，已跳过接管（未写入）：${cur.reason ?? "本机读取异常"}`);
     } else {
       let allow = cur.state === "ok";
       if (!allow) {
@@ -534,12 +547,23 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
           allow = r.output.trim().endsWith("yes");
         }
       }
-      if (allow) {
+      if (!allow) {
+        onData("该主机没有 codex daemon，无需配置 daemon updater\n");
+      } else {
         const old = cur.state === "ok" ? cur.content : "";
-        const next = editDaemonSettings(old, au);
+        let next;
+        try {
+          next = editDaemonSettings(old, au);
+        } catch (e) {
+          warn(`daemon settings.json 无法安全改写，已跳过接管：${e.message}`);
+          next = old;
+        }
         if (next !== old) {
           await writeConfigFile(host, localDs, dsExpr, next, onData);
+          changed = true;
           onData(`已接管 daemon updater：autoUpdateEnabled=${au.daemonAutoUpdate}\n`);
+        } else if (!warned) {
+          onData("daemon settings.json 已匹配设置，无需修改\n");
         }
       }
     }
@@ -549,16 +573,36 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
       channel,
       minimumVersion: pinnedVersion // 固定版本时写版本地板；否则不动
     };
-    const r = await edit(
+    if (await edit(
       "claude settings.json",
       expandHomeLocal("~/.claude/settings.json"),
       remotePathExpr("~/.claude/settings.json"),
       (old) => editClaudeSettings(old, claudeAu)
-    );
-    if (r?.changed) {
+    )) {
       onData(`已接管 claude settings.json：DISABLE_AUTOUPDATER=${au.disableAutoUpdater ? "1" : "移除"}${pinnedVersion ? `，minimumVersion=${pinnedVersion}` : ""}\n`);
     }
   }
+  return { changed, warned };
+}
+
+/** 接管结果的一句话描述：有告警且没改成时不能说「已匹配」，那是被跳过了 */
+const takeoverLabel = (r) =>
+  r.changed ? `自动更新配置已更新${r.warned ? "（部分项有告警，详见日志）" : ""}`
+    : r.warned ? "自动更新配置未能应用（有告警，详见日志）"
+    : "自动更新配置已匹配，无需修改";
+
+/** 固定版本号（渠道字段填了具体版本）时返回该版本，否则空 */
+const pinnedOf = (spec) => (VERSION_RE.test(spec ?? "") ? spec : "");
+
+/**
+ * 立即把设置里的官方自动更新开关应用到某台主机的某个工具（独立于安装，npm 版同样适用）。
+ * @returns {Promise<string>} 一句话结果
+ */
+export async function applyAutoUpdate(host, tool, config, onData = () => {}) {
+  const toolCfg = resolveToolConfig(config, host, tool);
+  onData(`[auto-update] ${tool}：应用官方自动更新设置\n`);
+  const r = await takeoverAutoUpdate(host, tool, config, { pinnedVersion: pinnedOf(toolCfg.channel), channel: toolCfg.channel }, onData);
+  return `${tool} ${takeoverLabel(r)}`;
 }
 
 // ---------- 安装前预检 ----------
@@ -634,6 +678,67 @@ export function preflight(host, tool, installDir, state) {
 // ---------- 安装 ----------
 
 /**
+ * 目标机是否已经是「该版本的 hub 托管独立安装」：版本库里有该版本、current 与 installDir 入口都指向它、
+ * 入口实际运行报告的版本恰好是目标版本。检测失败一律按「未安装」处理（回落到正常安装）。
+ */
+async function isStandaloneInstalled(host, tool, version, installDir) {
+  try {
+    if (host.kind === "local") return await isStandaloneInstalledLocal(tool, version, installDir);
+    const dirExpr = remotePathExpr(installDir);
+    const verOf = `head -n1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n1`;
+    const script = tool === "codex"
+      ? `VERSION=${sq(version)}
+ROOT="$HOME/.codex/packages/standalone"
+ENTRY=${dirExpr}/codex
+cur=$(readlink -f "$ROOT/current" 2>/dev/null || true)
+case "$(basename "$cur")" in "$VERSION"-*) ;; *) exit 0 ;; esac
+[ "$(readlink -f "$ENTRY" 2>/dev/null)" = "$(readlink -f "$ROOT/current/bin/codex" 2>/dev/null)" ] || exit 0
+got=$("$ENTRY" --version 2>&1 | ${verOf})
+[ "$got" = "$VERSION" ] && echo __ALREADY__
+exit 0`
+      : `VERSION=${sq(version)}
+DIR="$HOME/.local/share/claude/versions"
+ENTRY=${dirExpr}/claude
+[ -f "$DIR/$VERSION" ] || exit 0
+[ "$(readlink -f "$ENTRY" 2>/dev/null)" = "$(readlink -f "$DIR/$VERSION" 2>/dev/null)" ] || exit 0
+got=$("$ENTRY" --version 2>&1 | ${verOf})
+[ "$got" = "$VERSION" ] && echo __ALREADY__
+exit 0`;
+    const r = await runRemoteBash(host.id, script, { timeoutMs: 30_000 });
+    return r.output.includes("__ALREADY__");
+  } catch {
+    return false;
+  }
+}
+
+async function isStandaloneInstalledLocal(tool, version, installDir) {
+  const psq = (s) => `'${s.replace(/'/g, "''")}'`;
+  const installDirAbs = expandHomeLocal(installDir);
+  const common = `
+$ver = ${psq(version)}
+function Get-Ver($exe) {
+  if (-not (Test-Path $exe)) { return '' }
+  $o = (& $exe --version 2>&1 | Select-Object -First 1)
+  if ("$o" -match '(\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.]+)?)') { return $Matches[1] }
+  return ''
+}`;
+  const script = tool === "codex"
+    ? `${common}
+$root = ${psq(expandHomeLocal("~/.codex/packages/standalone"))}
+$cur = Join-Path $root 'current'
+if (-not (Test-Path $cur)) { exit 0 }
+$tgt = @((Get-Item $cur).Target)[0]
+if (-not $tgt -or -not ((Split-Path $tgt -Leaf) -like ($ver + '-*'))) { exit 0 }
+if ((Get-Ver (Join-Path ${psq(installDirAbs)} 'codex.exe')) -eq $ver) { Write-Output '__ALREADY__' }`
+    : `${common}
+$store = ${psq(expandHomeLocal("~/.local/share/claude/versions"))}
+if (-not (Test-Path (Join-Path $store ($ver + '.exe')))) { exit 0 }
+if ((Get-Ver (Join-Path ${psq(installDirAbs)} 'claude.exe')) -eq $ver) { Write-Output '__ALREADY__' }`;
+  const r = await runLocalPwsh(script, { timeoutMs: 30_000 });
+  return r.output.includes("__ALREADY__");
+}
+
+/**
  * 安装/切换工具。method=standalone（默认，本函数处理）或 npm（委托现有 updateTool）。
  * @returns {Promise<string>} 任务摘要
  */
@@ -665,17 +770,22 @@ export async function installTool(host, tool, opts, onData) {
     onData("[预检] 该主机尚无探测数据，跳过 PATH 遮蔽预检（安装后会自动探测并校验生效版本）\n");
   }
 
-  const artifact = tool === "codex"
-    ? await codexArtifact(host, version, config, onData)
-    : await claudeArtifact(host, version, config, onData);
-
-  if (host.kind === "local") {
-    await installLocal(host, tool, version, artifact, installDirInput, config, onData);
+  // 幂等：目标机已经是该版本的独立安装就跳过下载与安装，只做配置接管（opts.force 可强制重装）
+  const alreadyInstalled = !opts.force && (await isStandaloneInstalled(host, tool, version, installDirInput));
+  if (alreadyInstalled) {
+    onData(`[skip] ${tool} ${version} 已是独立安装且入口生效，跳过下载与安装\n`);
   } else {
-    await installRemote(host, tool, version, artifact, installDirInput, config, onData);
+    const artifact = tool === "codex"
+      ? await codexArtifact(host, version, config, onData)
+      : await claudeArtifact(host, version, config, onData);
+    if (host.kind === "local") {
+      await installLocal(host, tool, version, artifact, installDirInput, config, onData);
+    } else {
+      await installRemote(host, tool, version, artifact, installDirInput, config, onData);
+    }
   }
 
-  await takeoverAutoUpdate(host, tool, config, { pinnedVersion: pinned, channel: toolCfg.channel }, onData);
+  const takeover = await takeoverAutoUpdate(host, tool, config, { pinnedVersion: pinned, channel: toolCfg.channel }, onData);
 
   // 验证 + 刷新探测快照
   onData("[verify] 重新探测验证…\n");
@@ -691,7 +801,9 @@ export async function installTool(host, tool, opts, onData) {
   // 生效版本校验：各 shell 上下文里 `command -v` 实际解析到的版本，而不只是二进制自身能执行
   const problems = effectiveProblems(probe, tool, version);
   for (const p of problems) onData(`[WARN] ⚠⚠⚠ ${p}\n`);
-  const base = `${tool} ${version} 已安装（standalone）`;
+  const base = alreadyInstalled
+    ? `${tool} ${version} 已是独立安装，已跳过安装；${takeoverLabel(takeover)}`
+    : `${tool} ${version} 已安装（standalone）`;
   return problems.length ? `${base}；⚠ 但${problems.join("；")}` : base;
 }
 

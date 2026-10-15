@@ -132,7 +132,7 @@ export default function App() {
           next.set(t.id, { ...next.get(t.id), ...t });
           return next;
         });
-        if (t.status !== "running" && ["check", "update", "catalog-push", "probe", "install", "cleanup", "path-repair"].includes(t.action)) refreshHosts();
+        if (t.status !== "running" && ["check", "update", "catalog-push", "probe", "install", "cleanup", "path-repair", "auto-update"].includes(t.action)) refreshHosts();
       }
     };
     return () => es.close();
@@ -605,7 +605,8 @@ function SettingsModal(props: {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  const save = async () => {
+  /** 保存设置；applyNow 时随后立即把自动更新设置写到所有已启用主机 */
+  const save = async (applyNow = false) => {
     setSaving(true);
     try {
       await api.saveSettings({
@@ -615,6 +616,7 @@ function SettingsModal(props: {
         tools: toolsCfg,
         autoUpdate: auCfg
       });
+      if (applyNow) await api.autoUpdateAll();
       props.onSaved();
     } catch (e) {
       alert((e as Error).message);
@@ -716,7 +718,7 @@ function SettingsModal(props: {
       </fieldset>
 
       <fieldset className="field-group">
-        <legend>官方自动更新接管（安装独立二进制时写入目标机配置；默认全禁，由 hub 统一更新）</legend>
+        <legend>官方自动更新接管（默认全禁，由 hub 统一更新；安装时会自动写入，也可随时立即应用）</legend>
         <label className="field inline">
           <input type="checkbox" checked={auCfg.codex.startupCheck} onChange={(e) => setAuCfg({ ...auCfg, codex: { ...auCfg.codex, startupCheck: e.target.checked } })} />
           <span>codex 启动时检查更新提示（关闭可避免 TUI 弹窗）</span>
@@ -738,10 +740,18 @@ function SettingsModal(props: {
           <input type="checkbox" checked={auCfg.claude.disableAutoUpdater} onChange={(e) => setAuCfg({ ...auCfg, claude: { disableAutoUpdater: e.target.checked } })} />
           <span>禁用 claude 后台静默自动更新（DISABLE_AUTOUPDATER=1）</span>
         </label>
+        <div className="modal-actions" style={{ justifyContent: "flex-start" }}>
+          <button className="ghost" disabled={saving}
+            title="先保存当前设置，再把上述开关写入所有已启用主机的 codex / claude 配置（内容已匹配则不改；写前自动备份 .agentclihub.bak）"
+            onClick={() => {
+              if (confirm("保存设置，并立即把官方自动更新开关应用到所有已启用主机？\n将改写各机 ~/.codex/config.toml、app-server-daemon/settings.json 和 ~/.claude/settings.json（已匹配的不改，写前自动备份）。")) save(true);
+            }}
+          >保存并立即应用到所有主机</button>
+        </div>
       </fieldset>
 
       <div className="modal-actions">
-        <button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存"}</button>
+        <button onClick={() => save()} disabled={saving}>{saving ? "保存中…" : "保存"}</button>
       </div>
     </Modal>
   );
@@ -922,6 +932,14 @@ function ProbeModal(props: { host: Host; config: Config; onAction: () => void; h
           </>
         )}
         <div className="modal-actions">
+          <button className="ghost"
+            title="把设置里的官方自动更新开关写入该主机的 codex / claude 配置（内容已匹配则不改，写前自动备份）"
+            onClick={() => {
+              if (confirm(`把官方自动更新设置应用到 ${props.hostName}？\n改写 ~/.codex/config.toml、app-server-daemon/settings.json 和 ~/.claude/settings.json（已匹配的不改，写前自动备份）。`)) {
+                api.autoUpdateHost(props.host.id).then(props.onAction).catch((e) => alert((e as Error).message));
+              }
+            }}
+          >应用自动更新设置</button>
           {(["codex", "claude"] as const).map((t) => {
             const hasLib = t === "codex" ? p.pkgRoots.some((r) => r.sub === "standalone") : p.meta.claudeVersionsDir !== "(absent)";
             return (

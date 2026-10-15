@@ -54,6 +54,9 @@ export const api = {
     req<PreflightResult>(`/api/hosts/${id}/preflight`, json({ tool, installDir })),
   installTool: (id: string, payload: { tool: "codex" | "claude"; method?: string; version?: string; installDir?: string }) =>
     req<{ taskId: string }>(`/api/hosts/${id}/install`, json(payload)),
+  autoUpdateHost: (id: string, tool?: "codex" | "claude") =>
+    req<{ taskId: string }>(`/api/hosts/${id}/auto-update`, json({ tool })),
+  autoUpdateAll: () => req<{ taskIds: string[] }>("/api/auto-update-all", { method: "POST" }),
   cleanupTool: (id: string, tool: "codex" | "claude", keep = 2) =>
     req<{ taskId: string }>(`/api/hosts/${id}/cleanup`, json({ tool, keep })),
   setToolsConfig: (hostIds: string[], tool: "codex" | "claude", method?: "standalone" | "npm", channel?: string) =>
