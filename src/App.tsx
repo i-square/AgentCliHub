@@ -496,6 +496,7 @@ function ToolCell(props: {
   const method = effective?.method ?? "npm";
   let badge: { text: string; cls: string };
   let canUpdate = false;
+  let aboveChannel = false;
   if (!current) badge = { text: "未安装", cls: "gray" };
   else if (!target) badge = { text: "渠道目标未知", cls: "gray" };
   else {
@@ -504,7 +505,10 @@ function ToolCell(props: {
     else if (c < 0) {
       badge = { text: "可更新", cls: "yellow" };
       canUpdate = true;
-    } else badge = { text: "高于渠道", cls: "gray" };
+    } else {
+      badge = { text: "高于渠道", cls: "gray" };
+      aboveChannel = true;
+    }
   }
   return (
     <td className="tool-cell">
@@ -514,15 +518,24 @@ function ToolCell(props: {
       </div>
       <div className="ver-actions">
         <span className={`badge ${badge.cls}`}>{badge.text}</span>
-        {current ? (
+        {!current ? (
+          <button className="update-btn" disabled={props.disabled} onClick={props.onInstall}>安装</button>
+        ) : canUpdate ? (
           <button
             className="update-btn"
-            disabled={props.disabled || !canUpdate}
+            disabled={props.disabled}
             onClick={props.onUpdate}
-            title={`方式 ${method === "standalone" ? "独立二进制" : "npm"} · 渠道 ${effective?.channel ?? "-"} · 目标 ${target || "未知"}`}
+            title={`方式 ${method === "standalone" ? "独立二进制" : "npm"} · 渠道 ${effective?.channel ?? "-"} · 目标 ${target}`}
           >更新</button>
+        ) : aboveChannel ? (
+          <button
+            className="update-btn"
+            disabled={props.disabled}
+            onClick={props.onInstall}
+            title={`当前 ${current} 高于渠道目标 ${target}；点此安装/切换到渠道版本（可换安装方式，含降级）`}
+          >装渠道版</button>
         ) : (
-          <button className="update-btn" disabled={props.disabled} onClick={props.onInstall}>安装</button>
+          <button className="update-btn" disabled title="已是渠道目标版本">更新</button>
         )}
         {props.extra}
       </div>
@@ -684,7 +697,7 @@ function SettingsModal(props: {
                 }}
               >
                 {t === "codex"
-                  ? <><option value="latest">latest（稳定线）</option><option value="prerelease">prerelease（预发布）</option></>
+                  ? <><option value="stable">stable（稳定线）</option><option value="latest">latest（同稳定线）</option><option value="prerelease">prerelease（预发布）</option></>
                   : <><option value="stable">stable（约慢一周）</option><option value="latest">latest</option></>}
                 <option value="custom">自定义版本号…</option>
               </select>
@@ -935,7 +948,8 @@ function ProbeModal(props: { host: Host; config: Config; onAction: () => void; h
 
 const VERSION_CHANNELS: Record<ToolId, { value: string; label: string }[]> = {
   codex: [
-    { value: "latest", label: "latest（稳定线）" },
+    { value: "stable", label: "stable（稳定线）" },
+    { value: "latest", label: "latest（同稳定线）" },
     { value: "prerelease", label: "prerelease（预发布）" }
   ],
   claude: [
@@ -966,7 +980,7 @@ function InstallModal(props: {
   const resolvedHint = (() => {
     if (channel === "custom") return customVersion.trim() || "（未填）";
     if (tool === "codex") {
-      if (channel === "latest") return v?.codex?.latest ? v.codex.latest : "未知（先刷新版本缓存）";
+      if (channel === "latest" || channel === "stable") return v?.codex?.latest ? v.codex.latest : "未知（先刷新版本缓存）";
       if (channel === "prerelease") return v?.codex?.prerelease ?? "未知";
     } else {
       if (channel === "stable") return v?.claude?.stable ?? "未知";
@@ -1100,7 +1114,7 @@ function BatchChannelModal(props: {
   const [scope, setScope] = useState<"selected" | "all">("selected");
   const [busy, setBusy] = useState(false);
   const targets = scope === "selected" ? props.hosts : props.allHosts;
-  const channelOptions = tool === "codex" ? ["latest", "prerelease"] : ["stable", "latest"];
+  const channelOptions = tool === "codex" ? ["stable", "latest", "prerelease"] : ["stable", "latest"];
   const effectiveChannel = channel === "custom" ? custom.trim() : channel;
 
   const save = async () => {

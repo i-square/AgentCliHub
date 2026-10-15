@@ -64,7 +64,15 @@ app.get("/api/hosts", (req, res) => {
     for (const t of ["codex", "claude"]) {
       const cfg = resolveToolConfig(config, h, t);
       let target = "";
-      try { target = resolveVersionSpec(state, t, cfg.channel); } catch { /* 缓存为空时留空 */ }
+      try {
+        if (cfg.method === "npm") {
+          // npm 只有 latest 通道：目标始终以 npm 最新为准（用 hub 缓存，远程不查）
+          const tv = state.toolVersions ?? {};
+          target = (t === "codex" ? tv.codex?.latest : tv.claude?.latest) ?? "";
+        } else {
+          target = resolveVersionSpec(state, t, cfg.channel);
+        }
+      } catch { /* 缓存为空时留空 */ }
       effectiveTools[h.id][t] = { ...cfg, target };
     }
   }
