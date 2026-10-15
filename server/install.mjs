@@ -245,22 +245,31 @@ async function claudeArtifact(host, version, config, onData) {
 
 // ---------- 远程文件读写（配置接管用） ----------
 
-/** 三态读取：ok(content) / missing(文件不存在，可新建) / error(读取失败或输出被噪音破坏，不得写入) */
+/**
+ * 三态读取：ok(content) / missing(文件不存在，可新建) / error(读取失败或输出无法解析，不得写入；reason 说明原因)
+ * 兼容 CRLF 传输：部分主机（如 Windows sshd 转发到 WSL）会把 \n 转成 \r\n，此时标记行以 \r\n 结尾，
+ * 内容里每个 \n 也被加了 \r，需整体还原（原文件自带的 \r\n 传输后是 \r\r\n，还原一次即得到原样）。
+ */
 async function remoteReadText(host, pathExpr) {
   const sentinel = "__ACH_NOFILE_7f3d__";
   const begin = "__ACH_BEGIN_7f3d__";
   const end = "__ACH_END_7f3d__";
-  // 用 begin/end 标记包裹内容，隔离 ssh 横幅/警告等 stdout 噪音（如 hostkeys_prove_confirm）
+  const fail = "__ACH_READFAIL_7f3d__";
+  // 用 begin/end 标记包裹内容，隔离 ssh 横幅/警告等 stdout 噪音（如 hostkeys_prove_confirm）；
+  // cat 失败（如无权限）单独打失败标记，避免把报错文字当成文件内容
   const r = await runRemoteCmd(
     host.id,
-    `if [ -f ${pathExpr} ]; then printf '%s\\n' '${begin}'; cat -- ${pathExpr}; printf '\\n%s\\n' '${end}'; else printf '%s' '${sentinel}'; fi`,
+    `if [ -f ${pathExpr} ]; then printf '%s\\n' '${begin}'; if cat -- ${pathExpr}; then printf '\\n%s\\n' '${end}'; else printf '\\n%s\\n' '${fail}'; fi; else printf '%s' '${sentinel}'; fi`,
     { timeoutMs: 30_000 }
   );
-  if (r.code !== 0) return { state: "error" };
+  const why = (reason) => ({ state: "error", reason: `${reason}；原始输出前 160 字符: ${JSON.stringify(r.output.slice(0, 160))}` });
+  if (r.code !== 0) return why(`ssh 退出码 ${r.code}`);
+  if (r.output.includes(fail)) return why("cat 读取失败（权限？）");
   if (r.output.includes(sentinel)) return { state: "missing" };
-  const m = new RegExp(`${begin}\\n([\\s\\S]*?)\\n?${end}`).exec(r.output);
-  if (!m) return { state: "error" }; // 无法定位标记：宁可不写
-  return { state: "ok", content: m[1] };
+  const crlfTransport = r.output.includes(`${begin}\r\n`);
+  const m = new RegExp(`${begin}\\r?\\n([\\s\\S]*?)\\r?\\n?${end}`).exec(r.output);
+  if (!m) return why("找不到内容标记"); // 宁可不写
+  return { state: "ok", content: crlfTransport ? m[1].replace(/\r\n/g, "\n") : m[1] };
 }
 
 /** 读取接管目标文件（本机/远程统一为三态） */
@@ -484,7 +493,7 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
   const edit = async (label, localPath, remoteExpr, editFn, { allowCreate = true } = {}) => {
     const cur = await readConfigFile(host, localPath, remoteExpr);
     if (cur.state === "error") {
-      onData(`[warn] 读取 ${label} 失败，已跳过接管（未写入，避免覆盖原有配置）\n`);
+      onData(`[warn] 读取 ${label} 失败，已跳过接管（未写入，避免覆盖原有配置）：${cur.reason ?? "本机读取异常"}\n`);
       return null;
     }
     if (cur.state === "missing" && !allowCreate) return { skipped: true };
@@ -515,7 +524,7 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
     const dsExpr = remotePathExpr("~/.codex/app-server-daemon/settings.json");
     const cur = await readConfigFile(host, localDs, dsExpr);
     if (cur.state === "error") {
-      onData("[warn] 读取 daemon settings.json 失败，已跳过接管（未写入）\n");
+      onData(`[warn] 读取 daemon settings.json 失败，已跳过接管（未写入）：${cur.reason ?? "本机读取异常"}\n`);
     } else {
       let allow = cur.state === "ok";
       if (!allow) {
