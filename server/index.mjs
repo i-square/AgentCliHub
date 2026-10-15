@@ -24,6 +24,10 @@ import {
 } from "./catalogs.mjs";
 import { VENDOR_KEYS, maskKeys, saveCatalogKeys, pullVendorCatalog } from "./catalogSources.mjs";
 import { TaskManager } from "./tasks.mjs";
+import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
+import { probeHost } from "./probe.mjs";
+import { installTool, preflight, resolveToolConfig, resolveVersionSpec } from "./install.mjs";
+import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
 const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工具可执行远程命令，勿暴露到公网
@@ -55,16 +59,36 @@ app.get("/api/events", (req, res) => {
 app.get("/api/hosts", (req, res) => {
   const config = loadConfig();
   const state = loadState();
-  res.json({ hosts: buildHostList(config), state: state.hosts, tools: TOOLS, config });
+  const hosts = buildHostList(config);
+  const effectiveTools = {};
+  for (const h of hosts) {
+    effectiveTools[h.id] = {};
+    for (const t of ["codex", "claude"]) {
+      const cfg = resolveToolConfig(config, h, t);
+      let target = "";
+      try {
+        if (cfg.method === "npm") {
+          // npm 只有 latest 通道：目标始终以 npm 最新为准（用 hub 缓存，远程不查）
+          const tv = state.toolVersions ?? {};
+          target = (t === "codex" ? tv.codex?.latest : tv.claude?.latest) ?? "";
+        } else {
+          target = resolveVersionSpec(state, t, cfg.channel);
+        }
+      } catch { /* 缓存为空时留空 */ }
+      effectiveTools[h.id][t] = { ...cfg, target };
+    }
+  }
+  res.json({ hosts, state: state.hosts, tools: TOOLS, config, effectiveTools });
 });
 
 app.put("/api/hosts/:id/override", (req, res) => {
   const config = loadConfig();
-  const { enabled, prelude, note } = req.body ?? {};
+  const { enabled, prelude, note, installDir } = req.body ?? {};
   const o = (config.hostOverrides[req.params.id] ??= {});
   if (typeof enabled === "boolean") o.enabled = enabled;
   if (typeof prelude === "string") o.prelude = prelude;
   if (typeof note === "string") o.note = note;
+  if (typeof installDir === "string") o.installDir = installDir.trim();
   saveConfig(config);
   res.json({ ok: true });
 });
@@ -79,6 +103,35 @@ app.put("/api/settings", (req, res) => {
     if (typeof catalog.sourceUrl === "string" && catalog.sourceUrl.trim()) config.catalog.sourceUrl = catalog.sourceUrl.trim();
     if (typeof catalog.targetPath === "string" && catalog.targetPath.trim()) config.catalog.targetPath = catalog.targetPath.trim();
     if (typeof catalog.forceResponsesLiteFalse === "boolean") config.catalog.forceResponsesLiteFalse = catalog.forceResponsesLiteFalse;
+  }
+  const { versions, download } = req.body ?? {};
+  if (versions && typeof versions === "object") {
+    const m = Number(versions.checkIntervalMinutes);
+    if (Number.isFinite(m) && m >= 5 && m <= 7 * 24 * 60) config.versions.checkIntervalMinutes = Math.round(m);
+  }
+  const { tools, autoUpdate } = req.body ?? {};
+  if (tools && typeof tools === "object") {
+    for (const t of ["codex", "claude"]) {
+      const v = tools[t];
+      if (!v || typeof v !== "object") continue;
+      if (v.method === "standalone" || v.method === "npm") config.tools[t].method = v.method;
+      if (typeof v.installDir === "string") config.tools[t].installDir = v.installDir.trim();
+      if (typeof v.channel === "string") config.tools[t].channel = v.channel.trim() || config.tools[t].channel;
+    }
+  }
+  if (autoUpdate && typeof autoUpdate === "object") {
+    const c = autoUpdate.codex ?? {};
+    for (const k of ["startupCheck", "daemonAutoStart", "daemonAutoUpdate"]) {
+      if (typeof c[k] === "boolean") config.autoUpdate.codex[k] = c[k];
+    }
+    const interval = Number(c.daemonIntervalMinutes);
+    if (Number.isFinite(interval) && interval >= 15) config.autoUpdate.codex.daemonIntervalMinutes = Math.round(interval);
+    if (typeof autoUpdate.claude?.disableAutoUpdater === "boolean") config.autoUpdate.claude.disableAutoUpdater = autoUpdate.claude.disableAutoUpdater;
+  }
+  if (download && typeof download === "object") {
+    for (const k of ["proxy", "githubMirror", "githubToken"]) {
+      if (typeof download[k] === "string") config.download[k] = download[k].trim();
+    }
   }
   saveConfig(config);
   res.json({ ok: true });
@@ -210,6 +263,103 @@ app.post("/api/catalogs/:name/renumber", wrap((req, res) => {
   res.json({ ok: true, file });
 }));
 
+// ---------- 版本缓存（仅 hub 本机查外网）与深度探测 ----------
+app.get("/api/tool-versions", (req, res) => {
+  const state = loadState();
+  const config = loadConfig();
+  res.json({
+    versions: state.toolVersions ?? {},
+    checkIntervalMinutes: versionsConfig(config).checkIntervalMinutes,
+    proxyConfigured: Boolean(config.download?.proxy)
+  });
+});
+
+app.post("/api/tool-versions/refresh", async (req, res) => {
+  try {
+    await refreshVersions(loadConfig(), { force: true });
+    res.json({ ok: true, versions: loadState().toolVersions ?? {} });
+  } catch (err) {
+    res.status(502).json({ error: `刷新版本缓存失败：${err.message}` });
+  }
+});
+
+app.post("/api/hosts/:id/probe", (req, res) =>
+  startTask(req, res, "probe", "深度探测", async (host, onData) => {
+    const result = await probeHost(host, onData);
+    const state = loadState();
+    state.hosts[host.id] = { ...state.hosts[host.id], probe: result };
+    saveState(state);
+    const codexN = result.candidates.filter((c) => c.tool === "codex").length;
+    const claudeN = result.candidates.filter((c) => c.tool === "claude").length;
+    return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
+  })
+);
+
+// ---------- 独立二进制安装 / 预检 / 清理 / PATH 修复 ----------
+app.post("/api/hosts/:id/preflight", (req, res) => {
+  const host = getHost(loadConfig(), req.params.id);
+  if (!host) return res.status(404).json({ error: `未知主机: ${req.params.id}` });
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const config = loadConfig();
+  const installDir = (req.body?.installDir || resolveToolConfig(config, host, tool).installDir).trim();
+  res.json(preflight(host, tool, installDir, loadState()));
+});
+
+app.post("/api/hosts/:id/install", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const { method, version, installDir } = req.body ?? {};
+  startTask(req, res, "install", `安装 ${TOOLS[tool].label}`, async (host, onData) => {
+    return await installTool(host, tool, { config: loadConfig(), method, version, installDir }, onData);
+  });
+});
+
+app.post("/api/hosts/:id/cleanup", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  const keep = Number.isInteger(req.body?.keep) && req.body.keep >= 0 ? req.body.keep : 2;
+  startTask(req, res, "cleanup", `清理 ${TOOLS[tool].label} 旧版本`, async (host, onData) => {
+    return await cleanupTool(host, tool, keep, onData);
+  });
+});
+
+app.post("/api/hosts/:id/path-repair", (req, res) => {
+  const tool = req.body?.tool;
+  if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  startTask(req, res, "path-repair", "PATH 修复", async (host, onData) => {
+    const config = loadConfig();
+    const installDir = resolveToolConfig(config, host, tool).installDir;
+    onData(`installDir: ${installDir}\n`);
+    if (host.kind === "local") return await repairPathLocal(installDir, onData);
+    return await repairPathRemote(host, installDir, onData);
+  });
+});
+
+
+// 批量设置安装方式与更新渠道（写 hostOverrides，遵循各主机既有覆盖结构）
+app.put("/api/hosts/tools-config", (req, res) => {
+  const { hostIds, tool, method, channel } = req.body ?? {};
+  if (!Array.isArray(hostIds) || hostIds.length === 0) return res.status(400).json({ error: "hostIds 不能为空" });
+  if (!["codex", "claude"].includes(tool)) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  if (method !== undefined && !["standalone", "npm"].includes(method)) return res.status(400).json({ error: "method 必须是 standalone 或 npm" });
+  if (channel !== undefined && typeof channel !== "string") return res.status(400).json({ error: "channel 必须是字符串" });
+  const config = loadConfig();
+  const known = new Set(buildHostList(config).map((h) => h.id));
+  for (const id of hostIds) {
+    if (!known.has(id)) return res.status(400).json({ error: `未知主机: ${id}` });
+    const o = (config.hostOverrides[id] ??= {});
+    o.tools ??= {};
+    o.tools[tool] = {
+      ...(o.tools[tool] ?? {}),
+      ...(method ? { method } : {}),
+      ...(channel ? { channel: channel.trim() } : {})
+    };
+  }
+  saveConfig(config);
+  res.json({ ok: true });
+});
+
 // ---------- 任务 ----------
 app.get("/api/tasks", (req, res) => res.json({ tasks: tasks.list() }));
 app.get("/api/tasks/:id", (req, res) => {
@@ -250,15 +400,27 @@ app.post("/api/hosts/:id/update", (req, res) => {
   const tool = req.body?.tool;
   if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
   startTask(req, res, "update", `更新 ${TOOLS[tool].label}`, async (host, onData) => {
-    const r = await updateTool(host, tool, onData);
+    const config = loadConfig();
+    const toolCfg = resolveToolConfig(config, host, tool);
+    let summary;
+    if (toolCfg.method === "standalone") {
+      // 遵循该主机的安装方式与渠道：standalone 更新 = 安装渠道目标版本
+      onData(`[update] 生效策略: standalone / ${toolCfg.channel} / ${toolCfg.installDir}\n`);
+      summary = await installTool(host, tool, { config, version: toolCfg.channel, installDir: toolCfg.installDir }, onData);
+    } else {
+      onData("[update] 生效策略: npm\n");
+      const r = await updateTool(host, tool, onData);
+      summary = `${TOOLS[tool].label} 已更新${r.retried ? "（rename 失败已自动清理重试）" : ""}`;
+    }
     // 更新成功后立刻重新检查，刷新版本快照
-    const status = await checkHost(host, () => {}, loadConfig().catalog.targetPath);
+    const status = await checkHost(host, () => {}, config.catalog.targetPath);
     const state = loadState();
     state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
     saveState(state);
-    return `${TOOLS[tool].label} 已更新到 ${status[tool] || "未知"}${r.retried ? "（rename 失败已自动清理重试）" : ""}`;
+    return summary;
   });
 });
+
 
 app.post("/api/hosts/:id/restart-app-server", (req, res) =>
   startTask(req, res, "restart", "重启 app-server", async (host, onData) => {
@@ -329,6 +491,9 @@ if (fs.existsSync(distDir)) {
     res.type("text").send("前端尚未构建。开发请用 `pnpm dev`，或先 `pnpm build` 再 `pnpm start`。")
   );
 }
+
+// 版本缓存调度：启动时按上次检查时间决定，之后按间隔定时检查
+startVersionScheduler(loadConfig);
 
 app.listen(PORT, HOST, () => {
   console.log(`AgentCliHub 已启动: http://${HOST}:${PORT}`);

@@ -4,6 +4,19 @@
 
 ## 功能
 
+### 独立二进制管理（standalone 默认，npm 兜底）
+
+- **深度探测**（只读）：枚举各主机 codex / claude 的全部安装实例——逐条 PATH、登录/交互双 shell 上下文、nvm/fnm/mise 等已知路径、官方包根（含 daemon 进程反推自定义 CODEX_HOME）；`--version` 失效时按 package.json 兜底取版本；桌面版私带 CLI 标记豁免
+- **版本缓存**：仅 hub 本机查外网（codex：GitHub atom → api.github → releases.openai.com 降级链；claude：GCS stable/latest 双通道），默认 6 小时间隔（可配），启动时按上次检查时间决定；代理模板（socks5h 含认证内嵌）/ GitHub 镜像 / token 可配
+- **安装/切换**：官方同构布局（releases/<ver>-<target> + current 链接 + installDir 入口），sha256 校验（codex 走 SHA256SUMS 链），远程可直连则直连、否则 hub 下载后经 SSH 中转推送；installDir 必填可自定义（默认 ~/.local/bin，主机级覆盖），安装前 PATH 预检（逐上下文位置 + 遮蔽者清单 + 共享挂载警告）
+- **自动更新接管**：安装独立二进制时按设置写入目标机配置——codex 的 `check_for_update_on_startup` / `[features] daemon_auto_start` / daemon `updater.autoUpdateEnabled`，claude 的 `autoUpdatesChannel` / `env.DISABLE_AUTOUPDATER` / 固定版本时的 `minimumVersion`；默认全部禁用（含 codex 启动更新提示），统一由 hub 更新
+- **清理**：保留 current + 最新 2 个版本，跳过运行中进程占用（远程 /proc、本机进程路径）
+- **PATH 修复**（可选，显式触发）：远程写入「去重置顶」幂等块（`.profile` + shell rc，自动备份），本机写注册表用户 PATH（备份到 data/path-backups/）
+- **npm 兜底**：策略切到 npm 时沿用原有更新链路（rename 失败清理重试）
+
+### 原有功能
+
+
 - **主机清单自动发现**：本机（Windows / pwsh）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）
 - **状态检查**：各主机 codex / claude 当前版本 + npm registry 最新版本，一眼看出哪台该更新
 - **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
