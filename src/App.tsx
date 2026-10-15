@@ -956,7 +956,7 @@ function ProbeModal(props: { host: Host; config: Config; onAction: () => void; h
           <button className="ghost"
             title="把安装目录以去重置顶块写入 shell rc（远程）或注册表用户 PATH（本机），含备份"
             onClick={() => {
-              const dir = props.config.tools.codex.installDir || "~/.local/bin";
+              const dir = props.host.installDir || props.config.tools.codex.installDir || "~/.local/bin";
               if (confirm(`PATH 修复：将安装目录（${dir}）去重置顶到 PATH？\n远程写入 ~/.profile 与 shell rc（幂等块，自动备份）；本机写注册表用户 PATH（备份到 data/path-backups/）。\n新开的终端生效。`)) {
                 api.pathRepair(props.host.id, "codex").then(props.onAction).catch((e) => alert((e as Error).message));
               }
