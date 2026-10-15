@@ -3,3 +3,8 @@
 
 # shell 脚本强制 LF（CRLF 会导致 #! 解释器行失效）
 *.sh text eol=lf
+
+# cmd/bat 统一 CRLF（LF-only 会导致 cmd.exe 解析错乱）
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.cmd.template text eol=crlf

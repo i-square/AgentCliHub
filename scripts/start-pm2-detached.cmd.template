@@ -1,0 +1,11 @@
+@echo off
+rem Detached PM2 launcher -- TEMPLATE.
+rem Copy to start-pm2-detached.cmd in this directory (the copy is gitignored) and
+rem adjust paths for this machine. MUST be invoked via WMI (Win32_Process.Create)
+rem to escape the caller Job Object; direct execution from a terminal does NOT
+rem detach. See docs/deploy-windows.md for details.
+rem Note: if the WMI-inherited environment differs from your login shell, replace
+rem %USERPROFILE% / %APPDATA% / the node path below with absolute paths.
+set "PM2_HOME=%USERPROFILE%\.pm2"
+cd /d "%~dp0.."
+"C:\Program Files\nodejs\node.exe" "%APPDATA%\npm\node_modules\pm2\bin\pm2" resurrect
