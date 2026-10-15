@@ -1,0 +1,5 @@
+# 行尾统一：索引与比较均归一为 LF（Windows 按平台默认检出 CRLF，macOS/Linux 检出 LF）
+* text=auto
+
+# shell 脚本强制 LF（CRLF 会导致 #! 解释器行失效）
+*.sh text eol=lf
