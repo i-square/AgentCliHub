@@ -2,9 +2,26 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { api } from "./api";
 // CodeMirror 体积较大，目录页按需加载
 const CatalogsPage = lazy(() => import("./CatalogsPage"));
-import type { Config, Host, HostState, HostsResponse, PreflightResult, ProbeResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
+import type { Config, EffectiveTool, Host, HostState, HostsResponse, PreflightResult, ProbeResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 type ToolId = "codex" | "claude";
+
+/** semver 比较：a<b→-1，a=b→0，a>b→1；预发布（alpha/beta）低于同三号稳定版 */
+function cmpVer(a: string, b: string): number {
+  const parse = (v: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta)?[\d.]*)?$/.exec(v);
+    if (!m) return null;
+    return { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ?? "" };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return a.localeCompare(b);
+  for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] < y.n[i] ? -1 : 1;
+  if (x.pre === y.pre) return 0;
+  if (!x.pre) return 1;
+  if (!y.pre) return -1;
+  return x.pre < y.pre ? -1 : 1;
+}
 type ThemeMode = "light" | "dark" | "system";
 
 interface TaskWithLog extends Task {
@@ -66,6 +83,7 @@ export default function App() {
   const [versions, setVersions] = useState<ToolVersionsResponse | null>(null);
   const [probeHostId, setProbeHostId] = useState<string | null>(null);
   const [installTarget, setInstallTarget] = useState<{ host: Host; tool: ToolId } | null>(null);
+  const [channelModalOpen, setChannelModalOpen] = useState(false);
 
   const refreshHosts = useCallback(async () => {
     try {
@@ -140,14 +158,14 @@ export default function App() {
     []
   );
 
-  /** 需要更新的主机：已安装且（未知最新版或版本落后）；未检查/未安装的不纳入"全部更新" */
+  /** 需要更新的主机：已安装且落后于该主机生效渠道的目标版本；未安装/超前/未知渠道目标的不纳入 */
   const updatable = useCallback(
     (h: Host, tool: ToolId): boolean => {
       if (!h.enabled || !data) return false;
-      const s: HostState = data.state[h.id] ?? {};
-      const cur = tool === "codex" ? s.codex : s.claude;
-      const lat = tool === "codex" ? s.latestCodex : s.latestClaude;
-      return !!cur && cur !== lat;
+      const cur = tool === "codex" ? (data.state[h.id]?.codex ?? "") : (data.state[h.id]?.claude ?? "");
+      const target = data.effectiveTools?.[h.id]?.[tool]?.target ?? "";
+      if (!cur || !target) return false;
+      return cmpVer(cur, target) < 0;
     },
     [data]
   );
@@ -241,6 +259,12 @@ export default function App() {
             disabled={restartRunning || batchBusy || selectedEnabled.length === 0}
             onClick={() => batchRestart(selectedEnabled)}
           >重启 app-server</button>
+          <button
+            className="ghost"
+            disabled={batchBusy || (selectedEnabled.length === 0 && enabledHosts.length === 0)}
+            title="批量设置安装方式（独立二进制/npm）与更新渠道（stable/latest…），写入主机覆盖配置"
+            onClick={() => setChannelModalOpen(true)}
+          >渠道设置</button>
         </div>
         <div className="batch-spacer" />
         <span className="batch-hint">一键全部</span>
@@ -282,6 +306,7 @@ export default function App() {
               key={h.id}
               host={h}
               state={data.state[h.id] ?? {}}
+              etools={data.effectiveTools?.[h.id]}
               tasks={taskList.filter((t) => t.hostId === h.id && t.status === "running")}
               selected={selected.has(h.id)}
               onToggleSelect={(on) => toggleSelect(h.id, on)}
@@ -335,6 +360,14 @@ export default function App() {
           }}
         />
       )}
+      {channelModalOpen && (
+        <BatchChannelModal
+          hosts={selectedEnabled}
+          allHosts={enabledHosts}
+          onClose={() => setChannelModalOpen(false)}
+          onSaved={() => { setChannelModalOpen(false); refreshHosts(); }}
+        />
+      )}
       {installTarget && (
         <InstallModal
           host={installTarget.host}
@@ -372,6 +405,7 @@ export default function App() {
 function HostRow(props: {
   host: Host;
   state: HostState;
+  etools?: Record<ToolId, EffectiveTool>;
   tasks: TaskWithLog[];
   selected: boolean;
   onToggleSelect: (on: boolean) => void;
@@ -410,9 +444,10 @@ function HostRow(props: {
       </td>
       <ToolCell
         current={state.codex}
-        latest={state.latestCodex}
+        effective={props.etools?.codex}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("codex")}
+        onInstall={() => props.onInstall("codex")}
         extra={
           <>
             <ProbeBadges state={state} tool="codex" onShow={props.onShowProbe} />
@@ -428,9 +463,10 @@ function HostRow(props: {
       />
       <ToolCell
         current={state.claude}
-        latest={state.latestClaude}
+        effective={props.etools?.claude}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("claude")}
+        onInstall={() => props.onInstall("claude")}
         extra={<><ProbeBadges state={state} tool="claude" onShow={props.onShowProbe} /><button className="link" disabled={!host.enabled || busy} onClick={() => props.onInstall("claude")}>安装/切换</button></>}
       />
       <td className="actions-cell">
@@ -449,29 +485,45 @@ function HostRow(props: {
 
 function ToolCell(props: {
   current?: string;
-  latest?: string;
+  effective?: EffectiveTool;
   disabled: boolean;
   onUpdate: () => void;
+  onInstall: () => void;
   extra?: React.ReactNode;
 }) {
-  const { current, latest } = props;
+  const { current, effective } = props;
+  const target = effective?.target ?? "";
+  const method = effective?.method ?? "npm";
   let badge: { text: string; cls: string };
+  let canUpdate = false;
   if (!current) badge = { text: "未安装", cls: "gray" };
-  else if (!latest) badge = { text: "最新版未知", cls: "gray" };
-  else if (current === latest) badge = { text: "已是最新", cls: "green" };
-  else badge = { text: "可更新", cls: "yellow" };
-  const hasUpdate = !!latest && latest !== current;
+  else if (!target) badge = { text: "渠道目标未知", cls: "gray" };
+  else {
+    const c = cmpVer(current, target);
+    if (c === 0) badge = { text: "已是目标", cls: "green" };
+    else if (c < 0) {
+      badge = { text: "可更新", cls: "yellow" };
+      canUpdate = true;
+    } else badge = { text: "高于渠道", cls: "gray" };
+  }
   return (
-    <td>
+    <td className="tool-cell">
       <div className="ver-row">
         <span className="ver-current">{current || "—"}</span>
-        <span className="ver-latest">{hasUpdate ? `→ ${latest}` : ""}</span>
+        <span className="ver-latest">{canUpdate ? `→ ${target}` : ""}</span>
       </div>
       <div className="ver-actions">
         <span className={`badge ${badge.cls}`}>{badge.text}</span>
-        <button className="update-btn" disabled={props.disabled || (!!current && current === latest)} onClick={props.onUpdate}>
-          {current ? "更新" : "安装"}
-        </button>
+        {current ? (
+          <button
+            className="update-btn"
+            disabled={props.disabled || !canUpdate}
+            onClick={props.onUpdate}
+            title={`方式 ${method === "standalone" ? "独立二进制" : "npm"} · 渠道 ${effective?.channel ?? "-"} · 目标 ${target || "未知"}`}
+          >更新</button>
+        ) : (
+          <button className="update-btn" disabled={props.disabled} onClick={props.onInstall}>安装</button>
+        )}
         {props.extra}
       </div>
     </td>
@@ -505,7 +557,7 @@ function Modal(props: { title: string; onClose: () => void; children: React.Reac
           <h3>{props.title}</h3>
           <button className="ghost" onClick={props.onClose}>✕</button>
         </div>
-        {props.children}
+        <div className="modal-body">{props.children}</div>
       </div>
     </div>
   );
@@ -1028,6 +1080,87 @@ function InstallModal(props: {
       )}
       <div className="modal-actions">
         <button onClick={install} disabled={busy}>{busy ? "提交中…" : "开始安装"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------- 批量渠道设置 ----------
+
+function BatchChannelModal(props: {
+  hosts: Host[];
+  allHosts: Host[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [tool, setTool] = useState<ToolId>("codex");
+  const [method, setMethod] = useState<"" | "standalone" | "npm">("");
+  const [channel, setChannel] = useState("");
+  const [custom, setCustom] = useState("");
+  const [scope, setScope] = useState<"selected" | "all">("selected");
+  const [busy, setBusy] = useState(false);
+  const targets = scope === "selected" ? props.hosts : props.allHosts;
+  const channelOptions = tool === "codex" ? ["latest", "prerelease"] : ["stable", "latest"];
+  const effectiveChannel = channel === "custom" ? custom.trim() : channel;
+
+  const save = async () => {
+    if (!method && !effectiveChannel) return alert("请至少选择一项要设置的内容（方式或渠道）");
+    setBusy(true);
+    try {
+      await api.setToolsConfig(
+        targets.map((h) => h.id),
+        tool,
+        method || undefined,
+        effectiveChannel || undefined
+      );
+      props.onSaved();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="批量渠道设置" onClose={props.onClose}>
+      <div className="kv" style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <label>工具
+          <select value={tool} onChange={(e) => { setTool(e.target.value as ToolId); setChannel(""); }}>
+            <option value="codex">Codex CLI</option>
+            <option value="claude">Claude Code</option>
+          </select>
+        </label>
+        <label>安装方式
+          <select value={method} onChange={(e) => setMethod(e.target.value as "" | "standalone" | "npm")}>
+            <option value="">（不变）</option>
+            <option value="standalone">独立二进制</option>
+            <option value="npm">npm</option>
+          </select>
+        </label>
+        <label>更新渠道
+          <select value={channel} onChange={(e) => setChannel(e.target.value)}>
+            <option value="">（不变）</option>
+            {channelOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            <option value="custom">自定义版本号…</option>
+          </select>
+        </label>
+        {channel === "custom" && (
+          <input style={{ width: 130 }} placeholder="x.y.z" value={custom} onChange={(e) => setCustom(e.target.value)} />
+        )}
+      </div>
+      <div className="kv" style={{ marginTop: 10 }}>
+        <label className="field inline">
+          <input type="radio" checked={scope === "selected"} onChange={() => setScope("selected")} disabled={props.hosts.length === 0} />
+          <span>选中主机（{props.hosts.length} 台）</span>
+        </label>
+        <label className="field inline">
+          <input type="radio" checked={scope === "all"} onChange={() => setScope("all")} />
+          <span>全部启用主机（{props.allHosts.length} 台）</span>
+        </label>
+      </div>
+      <p className="muted kv">写入各主机的覆盖配置（hostOverrides）。全局默认值请在设置页修改。</p>
+      <div className="modal-actions">
+        <button onClick={save} disabled={busy || targets.length === 0}>{busy ? "保存中…" : `应用到 ${targets.length} 台`}</button>
       </div>
     </Modal>
   );

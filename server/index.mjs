@@ -24,7 +24,7 @@ import {
 import { TaskManager } from "./tasks.mjs";
 import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
-import { installTool, preflight, resolveToolConfig } from "./install.mjs";
+import { installTool, preflight, resolveToolConfig, resolveVersionSpec } from "./install.mjs";
 import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
@@ -57,7 +57,18 @@ app.get("/api/events", (req, res) => {
 app.get("/api/hosts", (req, res) => {
   const config = loadConfig();
   const state = loadState();
-  res.json({ hosts: buildHostList(config), state: state.hosts, tools: TOOLS, config });
+  const hosts = buildHostList(config);
+  const effectiveTools = {};
+  for (const h of hosts) {
+    effectiveTools[h.id] = {};
+    for (const t of ["codex", "claude"]) {
+      const cfg = resolveToolConfig(config, h, t);
+      let target = "";
+      try { target = resolveVersionSpec(state, t, cfg.channel); } catch { /* 缓存为空时留空 */ }
+      effectiveTools[h.id][t] = { ...cfg, target };
+    }
+  }
+  res.json({ hosts, state: state.hosts, tools: TOOLS, config, effectiveTools });
 });
 
 app.put("/api/hosts/:id/override", (req, res) => {
@@ -269,6 +280,29 @@ app.post("/api/hosts/:id/path-repair", (req, res) => {
 });
 
 
+// 批量设置安装方式与更新渠道（写 hostOverrides，遵循各主机既有覆盖结构）
+app.put("/api/hosts/tools-config", (req, res) => {
+  const { hostIds, tool, method, channel } = req.body ?? {};
+  if (!Array.isArray(hostIds) || hostIds.length === 0) return res.status(400).json({ error: "hostIds 不能为空" });
+  if (!["codex", "claude"].includes(tool)) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
+  if (method !== undefined && !["standalone", "npm"].includes(method)) return res.status(400).json({ error: "method 必须是 standalone 或 npm" });
+  if (channel !== undefined && typeof channel !== "string") return res.status(400).json({ error: "channel 必须是字符串" });
+  const config = loadConfig();
+  const known = new Set(buildHostList(config).map((h) => h.id));
+  for (const id of hostIds) {
+    if (!known.has(id)) return res.status(400).json({ error: `未知主机: ${id}` });
+    const o = (config.hostOverrides[id] ??= {});
+    o.tools ??= {};
+    o.tools[tool] = {
+      ...(o.tools[tool] ?? {}),
+      ...(method ? { method } : {}),
+      ...(channel ? { channel: channel.trim() } : {})
+    };
+  }
+  saveConfig(config);
+  res.json({ ok: true });
+});
+
 // ---------- 任务 ----------
 app.get("/api/tasks", (req, res) => res.json({ tasks: tasks.list() }));
 app.get("/api/tasks/:id", (req, res) => {
@@ -309,15 +343,27 @@ app.post("/api/hosts/:id/update", (req, res) => {
   const tool = req.body?.tool;
   if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
   startTask(req, res, "update", `更新 ${TOOLS[tool].label}`, async (host, onData) => {
-    const r = await updateTool(host, tool, onData);
+    const config = loadConfig();
+    const toolCfg = resolveToolConfig(config, host, tool);
+    let summary;
+    if (toolCfg.method === "standalone") {
+      // 遵循该主机的安装方式与渠道：standalone 更新 = 安装渠道目标版本
+      onData(`[update] 生效策略: standalone / ${toolCfg.channel} / ${toolCfg.installDir}\n`);
+      summary = await installTool(host, tool, { config, version: toolCfg.channel, installDir: toolCfg.installDir }, onData);
+    } else {
+      onData("[update] 生效策略: npm\n");
+      const r = await updateTool(host, tool, onData);
+      summary = `${TOOLS[tool].label} 已更新${r.retried ? "（rename 失败已自动清理重试）" : ""}`;
+    }
     // 更新成功后立刻重新检查，刷新版本快照
-    const status = await checkHost(host, () => {}, loadConfig().catalog.targetPath);
+    const status = await checkHost(host, () => {}, config.catalog.targetPath);
     const state = loadState();
     state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
     saveState(state);
-    return `${TOOLS[tool].label} 已更新到 ${status[tool] || "未知"}${r.retried ? "（rename 失败已自动清理重试）" : ""}`;
+    return summary;
   });
 });
+
 
 app.post("/api/hosts/:id/restart-app-server", (req, res) =>
   startTask(req, res, "restart", "重启 app-server", async (host, onData) => {

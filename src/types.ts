@@ -63,6 +63,8 @@ export interface HostsResponse {
   state: Record<string, HostState>;
   tools: Record<string, ToolInfo>;
   config: Config;
+  /** 每台主机的生效安装策略（全局默认 + 主机覆盖合并）+ 渠道目标版本 */
+  effectiveTools: Record<string, Record<"codex" | "claude", EffectiveTool>>;
 }
 
 export interface Task {
@@ -183,4 +185,12 @@ export interface PreflightResult {
   shadowedBy?: { index: number; dir: string; version: string; method: string }[];
   sharedWarning?: string;
   installDir?: string;
+}
+
+export interface EffectiveTool {
+  method: "standalone" | "npm";
+  installDir: string;
+  channel: string;
+  /** 渠道解析出的目标版本（版本缓存为空时为空串） */
+  target: string;
 }

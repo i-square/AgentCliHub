@@ -55,6 +55,12 @@ export const api = {
     req<{ taskId: string }>(`/api/hosts/${id}/install`, json(payload)),
   cleanupTool: (id: string, tool: "codex" | "claude", keep = 2) =>
     req<{ taskId: string }>(`/api/hosts/${id}/cleanup`, json({ tool, keep })),
+  setToolsConfig: (hostIds: string[], tool: "codex" | "claude", method?: "standalone" | "npm", channel?: string) =>
+    req<{ ok: true }>("/api/hosts/tools-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hostIds, tool, method, channel })
+    }),
   pathRepair: (id: string, tool: "codex" | "claude") =>
     req<{ taskId: string }>(`/api/hosts/${id}/path-repair`, json({ tool })),
 
