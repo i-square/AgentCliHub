@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { runLocalPwsh, runRemoteBash, runRemoteCmd } from "./exec.mjs";
 import { loadState, saveState } from "./store.mjs";
-import { updateTool } from "./tools.mjs";
+import { updateTool, bashPrelude } from "./tools.mjs";
 import { curlText } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
 
@@ -299,46 +299,88 @@ async function remoteWriteText(host, pathExpr, content, onData) {
   if (r.code !== 0) throw new Error(`远程写入 ${pathExpr} 失败`);
 }
 
-/** 大文件经 SSH stdin 中转推送（远程不可直连下载源时的兜底） */
-async function pushFileViaSsh(host, localFile, remotePath, onData) {
-  const b64File = `${localFile}.b64`;
-  try {
-    await pushFileViaSshInner(host, localFile, b64File, remotePath, onData);
-  } finally {
-    fs.rmSync(b64File, { force: true }); // 失败/中断时也清掉数百 MB 的临时编码文件
-  }
+/** 简单并发闸：最多 max 个同时执行，其余排队 */
+function createLimiter(max) {
+  let active = 0;
+  const queue = [];
+  const pump = () => {
+    while (active < max && queue.length) {
+      const { fn, resolve, reject } = queue.shift();
+      active++;
+      fn().then(resolve, reject).finally(() => {
+        active--;
+        pump();
+      });
+    }
+  };
+  return {
+    isFull: () => active >= max,
+    run: (fn) => new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      pump();
+    })
+  };
 }
 
-async function pushFileViaSshInner(host, localFile, b64File, remotePath, onData) {
+// hub 侧大文件传输（下载 / 中转推送）并发上限：多台主机同时装时避免带宽与内存被打满
+const hubTransfer = createLimiter(2);
+
+/**
+ * 确保 hub 本地已有校验通过的安装包。同一文件的并发请求共享一次下载（各主机常装同一架构的包），
+ * 下载到 .part 临时文件，校验通过后再改名，避免半成品或多个 curl 写同一文件。
+ */
+const inflightDownloads = new Map();
+async function ensureDownloaded(localFile, artifact, proxy, onData) {
+  if (fs.existsSync(localFile) && (await sha256File(localFile)) === artifact.sha256) {
+    onData("复用 hub 已有下载缓存\n");
+    return;
+  }
+  let task = inflightDownloads.get(localFile);
+  if (task) {
+    onData("同一安装包正在由其他任务下载，等待复用…\n");
+  } else {
+    if (hubTransfer.isFull()) onData("[queue] hub 传输名额已满，排队等待…\n");
+    task = hubTransfer
+      .run(async () => {
+        const part = `${localFile}.part`;
+        onData(`hub 下载 ${artifact.url}\n`);
+        await curlDownload(artifact.url, part, { proxy, onData });
+        const digest = await sha256File(part);
+        if (digest !== artifact.sha256) {
+          fs.rmSync(part, { force: true });
+          throw new Error(`下载校验失败: ${digest} != ${artifact.sha256}`);
+        }
+        fs.renameSync(part, localFile);
+      })
+      .finally(() => inflightDownloads.delete(localFile));
+    inflightDownloads.set(localFile, task);
+  }
+  await task;
+  onData("sha256 校验通过\n");
+}
+
+/**
+ * 大文件经 SSH stdin 中转推送（远程不可直连下载源时的兜底）。
+ * 原始二进制流式写入（`cat > file`），由 pipe 处理背压：内存占用恒定在一个 chunk 量级，
+ * 不再做 base64 编码（省掉 33% 流量和 1.33 倍大小的临时文件）。完整性由远程安装脚本的 sha256 校验保证。
+ */
+function pushFileViaSsh(host, localFile, remotePath, onData) {
   onData("远程直连失败，改由 hub 中转推送…\n");
-  // 分块 base64 编码，避免 300MB+ 字符串常驻内存
-  await new Promise((resolve, reject) => {
-    const rd = fs.createReadStream(localFile);
-    const wr = fs.createWriteStream(b64File);
-    let carry = Buffer.alloc(0);
-    rd.on("data", (c) => {
-      const buf = Buffer.concat([carry, c]);
-      const n = buf.length - (buf.length % 3);
-      wr.write(buf.subarray(0, n).toString("base64"));
-      carry = buf.subarray(n);
-    });
-    rd.on("end", () => {
-      if (carry.length) wr.write(carry.toString("base64"));
-      wr.end(resolve);
-    });
-    rd.on("error", reject);
-    wr.on("error", reject);
-  });
-  const size = fs.statSync(b64File).size;
-  await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
+    const size = fs.statSync(localFile).size;
+    const target = remoteCmdPath(remotePath);
     const child = spawn(
       "ssh",
-      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host.id, `mkdir -p "\$(dirname ${remoteCmdPath(remotePath)})" && base64 -d > ${remoteCmdPath(remotePath)}`],
-      { windowsHide: true }
+      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", host.id, `mkdir -p "\$(dirname ${target})" && cat > ${target}`],
+      { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] }
     );
+    let err = "";
+    child.stderr.on("data", (c) => (err = (err + c).slice(-300)));
+    child.stdin.on("error", () => {}); // 远程提前退出的 EPIPE 由 close 退出码体现
+
+    const rs = fs.createReadStream(localFile, { highWaterMark: 1024 * 1024 });
     let sent = 0;
     let lastEmit = 0;
-    const rs = fs.createReadStream(b64File, { highWaterMark: 1024 * 1024 });
     rs.on("data", (c) => {
       sent += c.length;
       const now = Date.now();
@@ -346,12 +388,16 @@ async function pushFileViaSshInner(host, localFile, b64File, remotePath, onData)
         lastEmit = now;
         onData(`中转推送中… ${Math.round((sent / size) * 100)}%\n`);
       }
-      if (!child.stdin.write(c)) rs.pause(), child.stdin.once("drain", () => rs.resume());
     });
-    rs.on("end", () => child.stdin.end());
-    rs.on("error", reject);
+    rs.on("error", (e) => {
+      child.kill();
+      reject(e);
+    });
+    rs.pipe(child.stdin);
     child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ssh 推送失败(${code})`))));
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`ssh 推送失败(${code}): ${err.trim().slice(-200)}`))
+    );
   });
 }
 
@@ -672,38 +718,43 @@ async function installRemote(host, tool, version, artifact, installDir, config, 
   const pkgRel = `${stagingRel}/${pkgName}`;
   const pkgExpr = remotePathExpr(pkgRel);
 
-  // 直连探测（HEAD）
-  const head = await runRemoteBash(
-    host.id,
-    `curl -fsSLI --connect-timeout 8 --max-time 20 -o /dev/null ${sq(artifact.url)} && echo __DIRECT_OK__ || echo __DIRECT_FAIL__`,
-    { timeoutMs: 30_000 }
-  );
-  const direct = head.output.includes("__DIRECT_OK__");
-  onData(direct ? "远程可直连下载源\n" : "远程不可直连下载源\n");
+  // 主机 prelude（代理/nvm 初始化等）必须在探测与安装脚本之前执行，否则内网机器的出网代理不生效、被误判为不可直连。
+  // 放在 set -eu 之前：prelude 里的 nvm / source 不保证兼容 -e/-u。
+  const prelude = bashPrelude(host);
+
+  // 直连探测（HEAD）。注意：能连通不代表可用——有的主机直连只有几十 KB/s，
+  // 这类主机应配置 preferRelay 强制走 hub 中转（hub 网络通常快得多）。
+  const forceRelay = config.hostOverrides?.[host.id]?.preferRelay === true || config.download?.preferRelay === true;
+  let direct = false;
+  if (forceRelay) {
+    onData("该主机配置为强制中转（preferRelay），跳过直连探测\n");
+  } else {
+    const head = await runRemoteBash(
+      host.id,
+      `${prelude}
+curl -fsSLI --connect-timeout 8 --max-time 20 -o /dev/null ${sq(artifact.url)} && echo __DIRECT_OK__ || echo __DIRECT_FAIL__`,
+      { timeoutMs: 45_000 }
+    );
+    direct = head.output.includes("__DIRECT_OK__");
+    onData(direct ? "远程可直连下载源\n" : "远程不可直连下载源\n");
+  }
 
   if (!direct) {
     // hub 下载 → 校验 → 中转推送
     const localFile = path.join(DL_DIR, `${tool}-${version}-${artifact.target ?? artifact.platformKey}.${artifact.kind === "zip" ? "zip" : artifact.kind === "tar.gz" ? "tar.gz" : "bin"}`);
-    if (!fs.existsSync(localFile) || (await sha256File(localFile)) !== artifact.sha256) {
-      onData(`hub 下载 ${artifact.url}\n`);
-      await curlDownload(artifact.url, localFile, { proxy: config.download?.proxy ?? "", onData });
-    } else {
-      onData("复用 hub 已有下载缓存\n");
-    }
-    const digest = await sha256File(localFile);
-    if (digest !== artifact.sha256) throw new Error(`hub 下载校验失败: ${digest} != ${artifact.sha256}`);
-    onData("hub 侧 sha256 校验通过\n");
+    await ensureDownloaded(localFile, artifact, config.download?.proxy ?? "", onData);
     const r0 = await runRemoteBash(host.id, `mkdir -p ${remotePathExpr(stagingRel)} && rm -f ${pkgExpr}`, { timeoutMs: 30_000 });
     if (r0.code !== 0) throw new Error("远程暂存目录准备失败");
-    await pushFileViaSsh(host, localFile, pkgRel, onData);
+    if (hubTransfer.isFull()) onData("[queue] hub 传输名额已满，排队等待…\n");
+    await hubTransfer.run(() => pushFileViaSsh(host, localFile, pkgRel, onData));
     onData("中转推送完成\n");
   }
 
   const downloadStep = direct
     ? `curl -fsSL --connect-timeout 15 --max-time 900 --retry 2 -o "\$PKG" ${sq(artifact.url)}`
-    : `cp ${pkgExpr} "\$PKG"`;
+    : `mv -f ${pkgExpr} "\$PKG"`; // 移动而非复制：省一份 100~240MB 的远程磁盘占用与拷贝时间
 
-  const script = buildRemoteInstallScript(tool, version, artifact, dirExpr, downloadStep, pkgExpr);
+  const script = `${prelude}\n${buildRemoteInstallScript(tool, version, artifact, dirExpr, downloadStep, pkgExpr)}`;
   const r = await runRemoteBash(host.id, script, { onData, timeoutMs: 15 * 60_000 });
   if (r.code !== 0 || !r.output.includes("__INSTALL_OK__")) {
     throw new Error(`远程安装失败（exit=${r.code}），详见日志`);
@@ -794,15 +845,7 @@ echo "__INSTALL_OK__"`;
 /** 本机 Windows 安装 */
 async function installLocal(host, tool, version, artifact, installDir, config, onData) {
   const localFile = path.join(DL_DIR, `${tool}-${version}-${artifact.target ?? artifact.platformKey}.${artifact.kind === "zip" ? "zip" : artifact.kind === "tar.gz" ? "tar.gz" : "bin"}`);
-  if (!fs.existsSync(localFile) || (await sha256File(localFile)) !== artifact.sha256) {
-    onData(`下载 ${artifact.url}\n`);
-    await curlDownload(artifact.url, localFile, { proxy: config.download?.proxy ?? "", onData });
-  } else {
-    onData("复用本地下载缓存\n");
-  }
-  const digest = await sha256File(localFile);
-  if (digest !== artifact.sha256) throw new Error(`sha256 校验失败: ${digest} != ${artifact.sha256}`);
-  onData("sha256 校验通过\n");
+  await ensureDownloaded(localFile, artifact, config.download?.proxy ?? "", onData);
 
   const installDirAbs = expandHomeLocal(installDir);
   const psq = (s) => `'${s.replace(/'/g, "''")}'`;

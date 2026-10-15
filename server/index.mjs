@@ -83,12 +83,13 @@ app.get("/api/hosts", (req, res) => {
 
 app.put("/api/hosts/:id/override", (req, res) => {
   const config = loadConfig();
-  const { enabled, prelude, note, installDir } = req.body ?? {};
+  const { enabled, prelude, note, installDir, preferRelay } = req.body ?? {};
   const o = (config.hostOverrides[req.params.id] ??= {});
   if (typeof enabled === "boolean") o.enabled = enabled;
   if (typeof prelude === "string") o.prelude = prelude;
   if (typeof note === "string") o.note = note;
   if (typeof installDir === "string") o.installDir = installDir.trim();
+  if (typeof preferRelay === "boolean") o.preferRelay = preferRelay;
   saveConfig(config);
   res.json({ ok: true });
 });
@@ -531,3 +532,12 @@ startVersionScheduler(loadConfig);
 app.listen(PORT, HOST, () => {
   console.log(`AgentCliHub 已启动: http://${HOST}:${PORT}`);
 });
+
+// 优雅停止（pm2 restart/stop 先发 SIGINT）：把运行中的任务标记为 interrupted 并落盘。
+// 被 SIGKILL/OOM 杀掉时来不及执行，由下次启动时 TaskManager 恢复逻辑兜底。
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    tasks.interruptRunning(`服务收到 ${sig} 停止/重启，任务被中断`);
+    process.exit(0);
+  });
+}

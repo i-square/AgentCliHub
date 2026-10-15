@@ -166,6 +166,7 @@ input[type="checkbox"]:disabled { cursor: not-allowed; }
 .dot.running { background: var(--accent); animation: pulse 1.2s infinite; }
 .dot.success { background: var(--green); }
 .dot.error { background: var(--red); }
+.dot.interrupted { background: var(--yellow, #d29922); }
 @keyframes pulse { 50% { opacity: 0.3; } }
 .task-label { font-weight: 600; font-size: 13px; }
 .task-summary { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

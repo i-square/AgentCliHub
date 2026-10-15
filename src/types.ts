@@ -16,6 +16,8 @@ export interface Host {
   note: string;
   /** 主机级安装目录覆盖（空 = 用全局工具默认） */
   installDir: string;
+  /** 强制走 hub 中转下载（直连慢/不通的内网主机） */
+  preferRelay: boolean;
 }
 
 export interface HostState {
@@ -64,7 +66,7 @@ export interface PullOfficialResult {
 
 export interface Config {
   excludePatterns: string[];
-  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string }>;
+  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string; preferRelay?: boolean }>;
   catalog: CatalogSettings;
   /** 版本号统取：固定检查间隔（分钟） */
   versions: { checkIntervalMinutes: number };
@@ -93,10 +95,12 @@ export interface Task {
   hostId: string;
   action: string;
   label: string;
-  status: "running" | "success" | "error";
+  status: "running" | "success" | "error" | "interrupted";
   startedAt: string;
   endedAt: string | null;
   summary: string;
+  /** 最后一行日志（中断时可看出进行到哪一步） */
+  progress?: string;
   logLength: number;
 }
 

@@ -20,7 +20,8 @@ const AUTO_PRELUDE = [
   "export PATH"
 ].join("\n");
 
-function bashPrelude(host) {
+/** 主机 prelude（用户自定义，如代理/nvm 初始化）+ 自动 nvm PATH；所有远程脚本都应以它开头 */
+export function bashPrelude(host) {
   const parts = [];
   if (host.prelude?.trim()) parts.push(host.prelude.trim());
   parts.push(AUTO_PRELUDE);

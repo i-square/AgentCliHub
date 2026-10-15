@@ -752,12 +752,13 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
   const [prelude, setPrelude] = useState(props.host.prelude);
   const [note, setNote] = useState(props.host.note);
   const [installDir, setInstallDir] = useState(props.host.installDir ?? "");
+  const [preferRelay, setPreferRelay] = useState(props.host.preferRelay ?? false);
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
     setSaving(true);
     try {
-      await api.saveHostOverride(props.host.id, { enabled, prelude, note, installDir });
+      await api.saveHostOverride(props.host.id, { enabled, prelude, note, installDir, preferRelay });
       props.onSaved();
     } catch (e) {
       alert((e as Error).message);
@@ -782,6 +783,10 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
       <label className="field">
         <span>安装目录覆盖（两工具共用；留空用全局默认 ~/.local/bin；例 /mnt/shared/bin）</span>
         <input value={installDir} onChange={(e) => setInstallDir(e.target.value)} placeholder="~/.local/bin" />
+      </label>
+      <label className="field inline">
+        <input type="checkbox" checked={preferRelay} onChange={(e) => setPreferRelay(e.target.checked)} />
+        <span>强制走 hub 中转下载（直连慢/不通的内网主机）</span>
       </label>
       <label className="field">
         <span>备注</span>

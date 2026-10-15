@@ -26,7 +26,8 @@ export function buildHostList(config) {
       enabled: o.enabled ?? true,
       prelude: o.prelude ?? "",
       note: o.note ?? "",
-      installDir: o.installDir ?? ""
+      installDir: o.installDir ?? "",
+      preferRelay: o.preferRelay ?? false
     };
   });
 }

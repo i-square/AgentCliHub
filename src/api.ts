@@ -26,7 +26,7 @@ export const api = {
     req<{ taskId: string }>(`/api/hosts/${id}/update`, json({ tool })),
   restartAppServer: (id: string) =>
     req<{ taskId: string }>(`/api/hosts/${id}/restart-app-server`, { method: "POST" }),
-  saveHostOverride: (id: string, override: { enabled?: boolean; prelude?: string; note?: string; installDir?: string }) =>
+  saveHostOverride: (id: string, override: { enabled?: boolean; prelude?: string; note?: string; installDir?: string; preferRelay?: boolean }) =>
     req<{ ok: true }>(`/api/hosts/${id}/override`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
