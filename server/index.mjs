@@ -287,17 +287,37 @@ app.post("/api/tool-versions/refresh", async (req, res) => {
   }
 });
 
-app.post("/api/hosts/:id/probe", (req, res) =>
-  startTask(req, res, "probe", "深度探测", async (host, onData) => {
-    const result = await probeHost(host, onData);
-    const state = loadState();
-    state.hosts[host.id] = { ...state.hosts[host.id], probe: result };
-    saveState(state);
-    const codexN = result.candidates.filter((c) => c.tool === "codex").length;
-    const claudeN = result.candidates.filter((c) => c.tool === "claude").length;
-    return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
-  })
-);
+/** 深度探测一台主机并写入 state（单机探测与全部探测共用） */
+async function runProbe(host, onData) {
+  const result = await probeHost(host, onData);
+  const state = loadState();
+  state.hosts[host.id] = { ...state.hosts[host.id], probe: result };
+  saveState(state);
+  const codexN = result.candidates.filter((c) => c.tool === "codex").length;
+  const claudeN = result.candidates.filter((c) => c.tool === "claude").length;
+  return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
+}
+
+app.post("/api/hosts/:id/probe", (req, res) => startTask(req, res, "probe", "深度探测", runProbe));
+
+// 全部探测：对所有已启用主机并行发起探测（只读，不加主机锁）
+app.post("/api/probe-all", (req, res) => {
+  const hosts = buildHostList(loadConfig()).filter((h) => h.enabled);
+  const ids = [];
+  for (const host of hosts) {
+    const task = tasks.create({ hostId: host.id, action: "probe", label: `${host.name} · 深度探测` });
+    ids.push(task.id);
+    (async () => {
+      try {
+        tasks.finish(task.id, true, await runProbe(host, (c) => tasks.append(task.id, c)));
+      } catch (err) {
+        tasks.append(task.id, `\n[error] ${err.message}\n`);
+        tasks.finish(task.id, false, err.message);
+      }
+    })();
+  }
+  res.json({ taskIds: ids });
+});
 
 // ---------- 独立二进制安装 / 预检 / 清理 / PATH 修复 ----------
 app.post("/api/hosts/:id/preflight", (req, res) => {

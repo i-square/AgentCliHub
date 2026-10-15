@@ -230,6 +230,7 @@ export default function App() {
         <div className="topbar-actions">
           <ThemeSwitcher mode={theme} onChange={setTheme} />
           <button onClick={() => runAction(api.checkAll)}>全部检查</button>
+          <button onClick={() => runAction(api.probeAll)} title="对所有已启用主机执行深度探测（候选列表、PATH 视图、自动更新现状）">全部探测</button>
           <button className="ghost" onClick={() => setSettingsOpen(true)}>设置</button>
         </div>
       </header>

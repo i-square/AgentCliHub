@@ -21,6 +21,7 @@ export const api = {
   getTask: (id: string) => req<Task & { log: string }>(`/api/tasks/${id}`),
   checkHost: (id: string) => req<{ taskId: string }>(`/api/hosts/${id}/check`, { method: "POST" }),
   checkAll: () => req<{ taskIds: string[] }>("/api/check-all", { method: "POST" }),
+  probeAll: () => req<{ taskIds: string[] }>("/api/probe-all", { method: "POST" }),
   updateTool: (id: string, tool: "codex" | "claude") =>
     req<{ taskId: string }>(`/api/hosts/${id}/update`, json({ tool })),
   restartAppServer: (id: string) =>

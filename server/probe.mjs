@@ -325,6 +325,7 @@ export async function probeHost(host, onData = () => {}) {
     host.kind === "local"
       ? await runLocalPwsh(PS_PROBE, { onData: () => {}, timeoutMs: PROBE_TIMEOUT_MS })
       : await runRemoteBash(host.id, BASH_PROBE, { onData: () => {}, timeoutMs: PROBE_TIMEOUT_MS });
+  if (result.code !== 0) throw new Error(`探测执行失败（exit=${result.code}）：主机离线或 ssh 异常`);
   const parsed = parseProbeOutput(host, result.output);
   if (!parsed.done) {
     onData(`[probe] 警告：探测未完整结束（exit=${result.code}），结果可能不全\n`);
