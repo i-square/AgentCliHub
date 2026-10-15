@@ -7,6 +7,29 @@ const MAX_LOG_CHARS = 300_000;
 export class TaskManager extends EventEmitter {
   #tasks = new Map();
   #seq = 0;
+  #hostLocks = new Map(); // hostId → { tail: Promise, n: 排队+运行中的任务数 }
+
+  /**
+   * 同一主机的写操作串行执行（install/update/cleanup/path-repair 共用暂存目录与 current 链接，不能并发）。
+   * 排队而不是报错：批量更新遇到忙碌主机时不会中断其余主机。
+   */
+  async withHostLock(hostId, onWait, fn) {
+    const lock = this.#hostLocks.get(hostId) ?? { tail: Promise.resolve(), n: 0 };
+    this.#hostLocks.set(hostId, lock);
+    const prev = lock.tail;
+    let release;
+    lock.tail = new Promise((r) => (release = r));
+    if (lock.n > 0) onWait();
+    lock.n++;
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      lock.n--;
+      release();
+      if (lock.n === 0) this.#hostLocks.delete(hostId);
+    }
+  }
 
   create({ hostId, action, label }) {
     const task = {

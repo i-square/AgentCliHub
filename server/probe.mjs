@@ -78,7 +78,7 @@ const BASH_PROBE = [
   "done",
   // ---- 官方包根：默认 ~/.codex + 从运行中进程 cmdline 反推的自定义 CODEX_HOME ----
   'roots="$HOME/.codex"',
-  'extra=$(ps -eo args 2>/dev/null | grep -oE "/[^ ]*/packages/(standalone|app-server-daemon)/releases/" | sed -E "s|/packages/(standalone|app-server-daemon)/releases/$||" | sort -u || true)',
+  'extra=$(ps -eo args 2>/dev/null | grep -oE "/[^ ]*/packages/(standalone|app-server-daemon)/releases/" | sed -E "s#/packages/(standalone|app-server-daemon)/releases/\\$##" | sort -u || true)',
   'for r in $extra; do case " $roots " in *" $r "*) ;; *) roots="$roots $r" ;; esac; done',
   'for base in $roots; do',
   '  for sub in standalone app-server-daemon; do',
@@ -107,8 +107,8 @@ const BASH_PROBE = [
   // rc 文件 PATH / nvm 命中统计
   'for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile"; do',
   '  [ -f "$rc" ] || continue',
-  '  hits=$(grep -cE "\.local/bin|managed PATH" "$rc" 2>/dev/null || echo 0)',
-  '  nvm=$(grep -cE "nvm\.sh|NVM_DIR" "$rc" 2>/dev/null || echo 0)',
+  '  hits=$(grep -cE "\.local/bin|managed PATH" "$rc" 2>/dev/null | head -n1)',
+  '  nvm=$(grep -cE "nvm\.sh|NVM_DIR" "$rc" 2>/dev/null | head -n1)',
   '  echo "${M}rcFile=${rc}|${hits}|${nvm}"',
   "done",
   'echo "${M}done=1"'

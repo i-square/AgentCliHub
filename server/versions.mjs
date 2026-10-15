@@ -9,8 +9,14 @@ const GCS_BASE =
 const CODEX_ATOM = "https://github.com/openai/codex/releases.atom";
 const CODEX_API_LATEST = "https://api.github.com/repos/openai/codex/releases/latest";
 const CODEX_OPENAI_LATEST = "https://releases.openai.com/codex/channels/latest";
+// GitHub「最新正式版」页面：302 到 /releases/tag/rust-vX.Y.Z，不走 API，不受匿名限流影响
+const CODEX_RELEASES_LATEST = "https://github.com/openai/codex/releases/latest";
+const CODEX_NPM_LATEST = "https://registry.npmjs.org/@openai/codex/latest";
 
 const DEFAULT_INTERVAL_MIN = 360;
+// 某个工具的版本获取失败/缺失时，重试的最小间隔（避免调度器每分钟都打外网）
+const RETRY_BACKOFF_MS = 10 * 60_000;
+const SEMVER = /^\d+\.\d+\.\d+$/;
 
 export function versionsConfig(config) {
   const n = Number(config?.versions?.checkIntervalMinutes);
@@ -39,6 +45,24 @@ export function curlText(url, { proxy = "", headers = [], timeoutSec = 30 } = {}
   });
 }
 
+/** 跟随重定向，返回最终 URL（用于解析 GitHub releases/latest 指向的 tag） */
+function curlFinalUrl(url, { proxy = "", timeoutSec = 20 } = {}) {
+  return new Promise((resolve, reject) => {
+    const args = ["-sSIL", "--connect-timeout", "15", "--max-time", String(timeoutSec), "-o", process.platform === "win32" ? "NUL" : "/dev/null", "-w", "%{url_effective}"];
+    if (proxy) args.push("--proxy", proxy);
+    args.push(url);
+    const child = spawn("curl", args, { windowsHide: true });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => (out += c));
+    child.stderr.on("data", (c) => (err += c));
+    child.on("error", (e) => reject(new Error(`curl 不可用: ${e.message}`)));
+    child.on("close", (code) =>
+      code === 0 ? resolve(out.trim()) : reject(new Error(`curl 退出码 ${code}: ${err.trim().slice(0, 200) || "无输出"}`))
+    );
+  });
+}
+
 /** atom feed：过滤 alpha/beta 预发布，取首个稳定版 */
 function parseAtom(xml) {
   const titles = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].map((m) => m[1].trim());
@@ -59,25 +83,44 @@ function parseAtom(xml) {
 }
 
 async function fetchCodexLatest(proxy, token) {
-  // ① atom feed（无需鉴权，不易限流）
+  let prerelease = "";
+  // ① atom feed（无需鉴权）。近期可能全是 alpha，此时只取预发布号，稳定版继续往下找
   try {
     const xml = await curlText(CODEX_ATOM, { proxy, timeoutSec: 20 });
-    const { stable, prerelease } = parseAtom(xml);
-    if (stable) return { latest: stable, prerelease, source: "github-atom" };
+    const r = parseAtom(xml);
+    prerelease = r.prerelease;
+    if (r.stable) return { latest: r.stable, prerelease, source: "github-atom" };
   } catch {
     /* 继续降级 */
   }
-  // ② api.github.com（配 token 可提高限额）
+  const ok = (r) => ({ ...r, ...(prerelease ? { prerelease } : {}) });
+  // ② github.com/releases/latest 重定向（GitHub 定义的「最新正式版」，不走 API）
+  try {
+    const url = await curlFinalUrl(CODEX_RELEASES_LATEST, { proxy });
+    const m = /\/tag\/(?:rust-v)?(\d+\.\d+\.\d+)$/.exec(url);
+    if (m) return ok({ latest: m[1], source: "github-latest-redirect" });
+  } catch {
+    /* 继续降级 */
+  }
+  // ③ api.github.com（匿名 60 次/小时，配 token 可提高限额）
   try {
     const headers = token ? ["Authorization: Bearer " + token] : [];
     const body = await curlText(CODEX_API_LATEST, { proxy, headers, timeoutSec: 20 });
     const tag = JSON.parse(body).tag_name ?? "";
-    const m = /^(?:rust-v)?(\d+\.\d+\.\d+)/.exec(tag);
-    if (m) return { latest: m[1], source: "github-api" };
+    const m = /^(?:rust-v)?(\d+\.\d+\.\d+)$/.exec(tag);
+    if (m) return ok({ latest: m[1], source: "github-api" });
   } catch {
     /* 继续降级 */
   }
-  // ③ releases.openai.com（部分网络不可达）
+  // ④ npm registry：包版本与 GitHub 发布同步（独立二进制与 npm 同源发布）
+  try {
+    const body = await curlText(CODEX_NPM_LATEST, { proxy, timeoutSec: 20 });
+    const v = JSON.parse(body).version ?? "";
+    if (SEMVER.test(v)) return ok({ latest: v, source: "npm-registry" });
+  } catch {
+    /* 继续降级 */
+  }
+  // ⑤ releases.openai.com（部分网络不可达）
   const body = await curlText(CODEX_OPENAI_LATEST, { proxy, timeoutSec: 20 });
   let v = "";
   try {
@@ -88,7 +131,7 @@ async function fetchCodexLatest(proxy, token) {
   }
   const m = /(\d+\.\d+\.\d+)/.exec(String(v) || body);
   if (!m) throw new Error("所有 codex 版本源均不可用");
-  return { latest: m[1], source: "openai-releases" };
+  return ok({ latest: m[1], source: "openai-releases" });
 }
 
 async function fetchClaudeLatest(proxy) {
@@ -98,48 +141,61 @@ async function fetchClaudeLatest(proxy) {
   ]);
   const s = stable.trim();
   const l = latest.trim();
-  if (!/^\d+\.\d+\.\d+$/.test(s) && !/^\d+\.\d+\.\d+$/.test(l)) {
+  if (!SEMVER.test(s) || !SEMVER.test(l)) {
     throw new Error(`GCS 返回异常: stable=${s.slice(0, 40)} latest=${l.slice(0, 40)}`);
   }
   return { stable: s, latest: l, source: "gcs" };
 }
 
+/** 单个工具是否需要刷新：缺值/上次失败按短退避重试，正常则到期（间隔）才刷新 */
+function toolNeedsRefresh(entry, hasValue, intervalMs, nowMs) {
+  const lastOk = Date.parse(entry?.fetchedAt ?? "");
+  const lastTry = Date.parse(entry?.lastAttemptAt ?? "");
+  if (!hasValue || entry?.stale) {
+    return !Number.isFinite(lastTry) || nowMs - lastTry >= Math.min(RETRY_BACKOFF_MS, intervalMs);
+  }
+  return !Number.isFinite(lastOk) || nowMs - lastOk >= intervalMs;
+}
+
 /**
- * 检查并刷新版本缓存。force=false 时按间隔决定去留（启动与定时器共用此入口）。
+ * 检查并刷新版本缓存。force=false 时按工具分别判断新鲜度（启动与定时器共用此入口）。
+ * 注意：网络请求耗时可达数十秒，期间其他任务会写 state.json，所以落盘前必须重新读取，只合并 toolVersions。
  * @returns {{skipped: boolean, versions: object}}
  */
 export async function refreshVersions(config, { force = false } = {}) {
-  const state = loadState();
-  const prev = state.toolVersions ?? {};
+  const prev = loadState().toolVersions ?? {};
   const intervalMs = versionsConfig(config).checkIntervalMinutes * 60_000;
-  const last = Date.parse(prev.fetchedAt ?? "");
-  if (!force && Number.isFinite(last) && Date.now() - last < intervalMs) {
-    return { skipped: true, versions: prev };
-  }
+  const nowMs = Date.now();
+  const needCodex = force || toolNeedsRefresh(prev.codex, Boolean(prev.codex?.latest), intervalMs, nowMs);
+  const needClaude = force || toolNeedsRefresh(prev.claude, Boolean(prev.claude?.stable && prev.claude?.latest), intervalMs, nowMs);
+  if (!needCodex && !needClaude) return { skipped: true, versions: prev };
 
   const proxy = config.download?.proxy ?? "";
   const token = config.download?.githubToken ?? "";
   const now = new Date().toISOString();
-  const next = { fetchedAt: now };
+  const next = {};
 
-  try {
-    const r = await fetchCodexLatest(proxy, token);
-    next.codex = { ...r, fetchedAt: now, stale: false };
-  } catch (e) {
-    next.codex = { ...(prev.codex ?? {}), stale: true, error: e.message };
+  if (needCodex) {
+    try {
+      const r = await fetchCodexLatest(proxy, token);
+      next.codex = { ...r, fetchedAt: now, lastAttemptAt: now, stale: false };
+    } catch (e) {
+      next.codex = { ...(prev.codex ?? {}), lastAttemptAt: now, stale: true, error: e.message };
+    }
   }
-  try {
-    const r = await fetchClaudeLatest(proxy);
-    next.claude = { ...r, fetchedAt: now, stale: false };
-  } catch (e) {
-    next.claude = { ...(prev.claude ?? {}), stale: true, error: e.message };
+  if (needClaude) {
+    try {
+      const r = await fetchClaudeLatest(proxy);
+      next.claude = { ...r, fetchedAt: now, lastAttemptAt: now, stale: false };
+    } catch (e) {
+      next.claude = { ...(prev.claude ?? {}), lastAttemptAt: now, stale: true, error: e.message };
+    }
   }
-  // 两个都失败时保留旧 fetchedAt，避免掩盖真实的上次成功时间
-  if (!prev.codex && next.codex?.stale && !prev.claude && next.claude?.stale) {
-    delete next.fetchedAt;
-  }
+  // 顶层 fetchedAt（UI 的「上次检查」）仅在至少一个工具成功时推进
+  const anyOk = Object.values(next).some((t) => !t.stale);
 
-  state.toolVersions = { ...prev, ...next };
+  const state = loadState();
+  state.toolVersions = { ...(state.toolVersions ?? {}), ...next, ...(anyOk ? { fetchedAt: now } : {}) };
   saveState(state);
   return { skipped: false, versions: state.toolVersions };
 }

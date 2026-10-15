@@ -26,7 +26,7 @@ import { VENDOR_KEYS, maskKeys, saveCatalogKeys, pullVendorCatalog } from "./cat
 import { TaskManager } from "./tasks.mjs";
 import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
-import { installTool, preflight, resolveToolConfig, resolveVersionSpec } from "./install.mjs";
+import { installTool, preflight, resolveToolConfig, resolveVersionSpec, isValidVersionSpec } from "./install.mjs";
 import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
@@ -116,7 +116,11 @@ app.put("/api/settings", (req, res) => {
       if (!v || typeof v !== "object") continue;
       if (v.method === "standalone" || v.method === "npm") config.tools[t].method = v.method;
       if (typeof v.installDir === "string") config.tools[t].installDir = v.installDir.trim();
-      if (typeof v.channel === "string") config.tools[t].channel = v.channel.trim() || config.tools[t].channel;
+      if (typeof v.channel === "string") {
+        const ch = v.channel.trim();
+        if (ch && !isValidVersionSpec(t, ch)) return res.status(400).json({ error: `非法的渠道/版本: ${ch.slice(0, 40)}` });
+        config.tools[t].channel = ch || config.tools[t].channel;
+      }
     }
   }
   if (autoUpdate && typeof autoUpdate === "object") {
@@ -310,6 +314,8 @@ app.post("/api/hosts/:id/install", (req, res) => {
   const tool = req.body?.tool;
   if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
   const { method, version, installDir } = req.body ?? {};
+  if (!isValidVersionSpec(tool, version)) return res.status(400).json({ error: `非法的版本号: ${String(version).slice(0, 40)}` });
+  if (installDir !== undefined && typeof installDir !== "string") return res.status(400).json({ error: "installDir 必须是字符串" });
   startTask(req, res, "install", `安装 ${TOOLS[tool].label}`, async (host, onData) => {
     return await installTool(host, tool, { config: loadConfig(), method, version, installDir }, onData);
   });
@@ -320,7 +326,7 @@ app.post("/api/hosts/:id/cleanup", (req, res) => {
   if (!TOOLS[tool]) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
   const keep = Number.isInteger(req.body?.keep) && req.body.keep >= 0 ? req.body.keep : 2;
   startTask(req, res, "cleanup", `清理 ${TOOLS[tool].label} 旧版本`, async (host, onData) => {
-    return await cleanupTool(host, tool, keep, onData);
+    return await cleanupTool(host, tool, keep, onData, resolveToolConfig(loadConfig(), host, tool).installDir);
   });
 });
 
@@ -344,6 +350,7 @@ app.put("/api/hosts/tools-config", (req, res) => {
   if (!["codex", "claude"].includes(tool)) return res.status(400).json({ error: "tool 必须是 codex 或 claude" });
   if (method !== undefined && !["standalone", "npm"].includes(method)) return res.status(400).json({ error: "method 必须是 standalone 或 npm" });
   if (channel !== undefined && typeof channel !== "string") return res.status(400).json({ error: "channel 必须是字符串" });
+  if (channel && !isValidVersionSpec(tool, channel.trim())) return res.status(400).json({ error: `非法的渠道/版本: ${channel.slice(0, 40)}` });
   const config = loadConfig();
   const known = new Set(buildHostList(config).map((h) => h.id));
   for (const id of hostIds) {
@@ -368,15 +375,21 @@ app.get("/api/tasks/:id", (req, res) => {
   res.json(t);
 });
 
+/** 同一主机上必须串行的写操作（共用暂存目录 / current 链接 / 配置文件） */
+const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair"]);
+
 /** 启动一个后台任务并立即返回任务 id */
 function startTask(req, res, action, label, run) {
   const host = getHost(loadConfig(), req.params.id);
   if (!host) return res.status(404).json({ error: `未知主机: ${req.params.id}` });
   const task = tasks.create({ hostId: host.id, action, label: `${host.name} · ${label}` });
   const onData = (chunk) => tasks.append(task.id, chunk);
+  const exec = HOST_EXCLUSIVE.has(action)
+    ? () => tasks.withHostLock(host.id, () => onData("[queue] 该主机有其他写操作进行中，已排队等待…\n"), () => run(host, onData))
+    : () => run(host, onData);
   (async () => {
     try {
-      const result = await run(host, onData);
+      const result = await exec();
       tasks.finish(task.id, true, result ?? "完成");
     } catch (err) {
       tasks.append(task.id, `\n[error] ${err.message}\n`);

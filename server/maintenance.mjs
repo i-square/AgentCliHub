@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLocalPwsh, runRemoteBash } from "./exec.mjs";
-import { remotePathExpr } from "./install.mjs";
+import { remotePathExpr, expandHomeLocal } from "./install.mjs";
 
 const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -16,9 +16,10 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
  * @param {object} host
  * @param {"codex"|"claude"} tool
  * @param {number} keep 保留的最新版本数（不含 current 指向的）
+ * @param {string} installDir 该主机该工具实际生效的入口目录（用于定位 claude 的 current）
  */
-export async function cleanupTool(host, tool, keep = 2, onData = () => {}) {
-  const script = host.kind === "local" ? localCleanupScript(tool, keep) : remoteCleanupScript(tool, keep);
+export async function cleanupTool(host, tool, keep = 2, onData = () => {}, installDir = "~/.local/bin") {
+  const script = host.kind === "local" ? localCleanupScript(tool, keep, installDir) : remoteCleanupScript(tool, keep, installDir);
   const r = host.kind === "local"
     ? await runLocalPwsh(script, { onData, timeoutMs: 120_000 })
     : await runRemoteBash(host.id, script, { onData, timeoutMs: 120_000 });
@@ -26,39 +27,43 @@ export async function cleanupTool(host, tool, keep = 2, onData = () => {}) {
   return "清理完成";
 }
 
-/** 远程清理：只删目录/文件项，跳过 current 指向与 /proc 占用 */
-function remoteCleanupScript(tool, keep) {
+/** 远程清理：只删版本库下的项，跳过 current 指向、最新 N 个与运行中进程占用 */
+function remoteCleanupScript(tool, keep, installDir) {
   const listDir = tool === "codex"
     ? '"$HOME/.codex/packages/standalone/releases"'
     : '"$HOME/.local/share/claude/versions"';
+  // codex 的 current 是固定链接；claude 的 current 是实际生效 installDir 下入口链接的指向
   const currentExpr = tool === "codex"
     ? 'readlink -f "$HOME/.codex/packages/standalone/current" 2>/dev/null'
-    : 'readlink -f "$HOME/.local/bin/claude" 2>/dev/null';
+    : `readlink -f ${remotePathExpr(installDir)}/claude 2>/dev/null`;
   return `set -u
 KEEP=${keep}
 LIST=${listDir}
 [ -d "$LIST" ] || { echo "无版本库目录，无需清理"; exit 0; }
 CURRENT=$(${currentExpr} || true)
 echo "current: \${CURRENT:-none}"
-# 运行中占用：/proc 扫描 cmdline
+# 运行中占用：读 /proc/<pid>/exe（经 PATH 启动的进程 cmdline 里没有完整路径，不能用 cmdline 匹配）
+# 比较对象均为 realpath（~/.codex 可能是软链接）
 in_use() {
-  case "$CURRENT" in "$1"*) return 0 ;; esac
-  for p in /proc/[0-9]*/cmdline; do
-    if tr '\\0' '\\n' <"$p" 2>/dev/null | grep -qF "$1"; then return 0; fi
+  real="$1"
+  for p in /proc/[0-9]*/exe; do
+    t=$(readlink "$p" 2>/dev/null) || continue
+    case "$t" in "$real"|"$real"/*|"$real (deleted)") return 0 ;; esac
   done
   return 1
 }
 # 版本倒序（sort -V），保留前 KEEP 个
 i=0
 for item in $(ls "$LIST" 2>/dev/null | sort -rV); do
+  case "$item" in .*) continue ;; esac
   full="$LIST/$item"
-  case "$item" in .install-hub|.*) continue ;; esac
+  real=$(readlink -f "$full" 2>/dev/null || echo "$full")
   i=$((i+1))
-  if [ -n "$CURRENT" ] && [ "$(readlink -f "$full" 2>/dev/null)" = "$CURRENT" ]; then
+  if [ -n "$CURRENT" ] && [ "$real" = "$CURRENT" ]; then
     echo "保留(current): $item"; continue
   fi
   if [ $i -le $KEEP ]; then echo "保留(最新): $item"; continue; fi
-  if in_use "$full"; then echo "保留(运行中): $item"; continue; fi
+  if in_use "$real"; then echo "保留(运行中): $item"; continue; fi
   echo "删除: $item"
   rm -rf -- "$full"
 done
@@ -66,35 +71,43 @@ echo "__CLEANUP_OK__"`;
 }
 
 /** 本机 Windows 清理 */
-function localCleanupScript(tool, keep) {
-  const listDir = tool === "codex"
-    ? path.join(os.homedir(), ".codex", "packages", "standalone", "releases")
-    : path.join(os.homedir(), ".local", "share", "claude", "versions");
-  const currentPath = tool === "codex"
-    ? path.join(os.homedir(), ".codex", "packages", "standalone", "current")
-    : path.join(os.homedir(), ".local", "bin", "claude.exe");
+function localCleanupScript(tool, keep, installDir) {
+  const root = path.join(os.homedir(), ".codex", "packages", "standalone");
+  const listDir = tool === "codex" ? path.join(root, "releases") : path.join(os.homedir(), ".local", "share", "claude", "versions");
+  const currentPath = path.join(root, "current");
+  const claudeExe = path.join(expandHomeLocal(installDir), "claude.exe");
   const psq = (s) => `'${s.replace(/'/g, "''")}'`;
   return `
 $ErrorActionPreference = 'Continue'
 $keep = ${keep}
+$tool = ${psq(tool)}
 $list = ${psq(listDir)}
 if (-not (Test-Path $list)) { Write-Output '无版本库目录，无需清理'; exit 0 }
-$current = ''
-if (Test-Path ${psq(currentPath)}) { try { $current = (Get-Item ${psq(currentPath)}).LinkTarget } catch {} }
-Write-Output ("current: " + $current)
+# 版本号：只取 \\d+.\\d+.\\d+（目录名 0.162.1-x86_64-... 或文件名 2.1.287.exe），避免尾部 "." 让 [version] 转换抛异常
+function Get-Ver($name) { if ($name -match '(\\d+\\.\\d+\\.\\d+)') { return [version]$Matches[1] } return [version]'0.0.0' }
+# current：codex 取 current junction 目标；claude 入口是复制件（无链接），取入口 exe 自报的版本
+$current = ''; $curVer = $null
+if ($tool -eq 'codex') {
+  if (Test-Path ${psq(currentPath)}) { try { $current = [string](Get-Item ${psq(currentPath)}).Target } catch {} }
+} elseif (Test-Path ${psq(claudeExe)}) {
+  try { $o = (& ${psq(claudeExe)} --version 2>&1 | Select-Object -First 1); if ("$o" -match '(\\d+\\.\\d+\\.\\d+)') { $curVer = [version]$Matches[1] } } catch {}
+}
+Write-Output ("current: " + $current + $curVer)
 # 运行中占用：进程可执行路径
 $busy = @{}
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object { $busy[$_.ExecutablePath] = $true }
-$items = Get-ChildItem $list -ErrorAction SilentlyContinue | Sort-Object { [version](($_.Name -split '-')[0] -replace '[^0-9.]','') } -Descending
+$items = Get-ChildItem $list -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '.*' } | Sort-Object { Get-Ver $_.Name } -Descending
 $i = 0
 foreach ($it in $items) {
   $i++
   $full = $it.FullName
   if ($current -and ($full -eq $current -or $current.StartsWith($full))) { Write-Output ("保留(current): " + $it.Name); continue }
+  if ($curVer -and (Get-Ver $it.Name) -eq $curVer) { Write-Output ("保留(current): " + $it.Name); continue }
   if ($i -le $keep) { Write-Output ("保留(最新): " + $it.Name); continue }
   $inUse = $false
-  Get-ChildItem $full -Recurse -File -Include *.exe -ErrorAction SilentlyContinue | ForEach-Object { if ($busy.ContainsKey($_.FullName)) { $inUse = $true } }
-  if ($it.PSIsContainer -eq $false -and $busy.ContainsKey($full)) { $inUse = $true }
+  if ($it.PSIsContainer) {
+    Get-ChildItem $full -Recurse -File -Include *.exe -ErrorAction SilentlyContinue | ForEach-Object { if ($busy.ContainsKey($_.FullName)) { $inUse = $true } }
+  } elseif ($busy.ContainsKey($full)) { $inUse = $true }
   if ($inUse) { Write-Output ("保留(运行中): " + $it.Name); continue }
   Write-Output ("删除: " + $it.Name)
   Remove-Item $full -Recurse -Force -ErrorAction Continue
