@@ -41,3 +41,5 @@ catalogs/
 # 本机维护笔记（私有）
 AGENTS.md
 
+# 开发/调研文档（本机留存，不入库；命名约定 docs/dev-*.md）
+docs/dev-*.md
