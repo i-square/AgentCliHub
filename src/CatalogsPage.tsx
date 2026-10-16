@@ -7,11 +7,31 @@ import type {
   CatalogFileInfo,
   CatalogKeyInfo,
   CatalogSettings,
+  CcModelPickerEntry,
+  CcModelPickerOption,
   Config,
   Host,
   HostState,
   MergedInfo
 } from "./types";
+
+// 厂商 key（来源 catalog 文件名）-> 显示名称；未登记的按自定义文件名展示
+const VENDOR_LABELS: Record<string, string> = {
+  oai: "OpenAI",
+  glm: "ZAI（智谱）",
+  kimi: "Kimi",
+  deepseek: "DeepSeek"
+};
+const VENDOR_ORDER = ["oai", "glm", "kimi", "deepseek"];
+
+function groupByVendor(models: CcModelPickerEntry[]) {
+  const groups = new Map<string, CcModelPickerEntry[]>();
+  for (const m of models) groups.set(m.vendor, [...(groups.get(m.vendor) ?? []), m]);
+  const rank = (v: string) => (VENDOR_ORDER.includes(v) ? VENDOR_ORDER.indexOf(v) : VENDOR_ORDER.length);
+  return [...groups.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([vendor, ms]) => ({ vendor, label: VENDOR_LABELS[vendor] ?? vendor, models: ms }));
+}
 
 /** 跟随 <html data-theme> 的编辑器明暗主题 */
 function useEffectiveTheme(): "light" | "dark" {
@@ -85,6 +105,12 @@ export default function CatalogsPage(props: {
   const [pushBusy, setPushBusy] = useState(false);
   const [keysInfo, setKeysInfo] = useState<Record<string, CatalogKeyInfo>>({});
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  // CC Model Picker
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerScope, setPickerScope] = useState<"local" | "selected" | "all">("all");
+  const [pickerModels, setPickerModels] = useState<CcModelPickerEntry[]>([]);
+  const [pickerChecked, setPickerChecked] = useState<Set<string>>(new Set());
+  const [pickerSaving, setPickerSaving] = useState(false);
   const editorRef = useRef<{ name: string } | null>(null);
 
   const dirty = activeName !== null && content !== savedContent;
@@ -117,6 +143,46 @@ export default function CatalogsPage(props: {
     loadMerged().catch(() => {});
     loadKeys().catch(() => {});
   }, [loadFiles, loadMerged, loadKeys]);
+
+  /** 打开 Claude Code 模型选择器：读取合并后的模型 + hub 本机 settings.json 现有配置作为初始勾选 */
+  const openPicker = async (scope: "local" | "selected" | "all") => {
+    try {
+      const data = await api.getCcModelPicker();
+      const configured = new Set(data.current.map((o) => o.model.replace(/\[[^\]]*\]$/, "")));
+      const hasAny = data.models.some((m) => configured.has(m.slug));
+      setPickerModels(data.models);
+      setPickerChecked(
+        new Set(data.models.filter((m) => (hasAny ? configured.has(m.slug) : m.defaultChecked)).map((m) => m.slug))
+      );
+      setPickerScope(scope);
+      setPickerOpen(true);
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
+
+  /** 把勾选结果写入目标主机：每台主机一个后台任务（同主机串行），进度见页面底部任务日志 */
+  const applyPicker = async () => {
+    setPickerSaving(true);
+    try {
+      const options: CcModelPickerOption[] = pickerModels
+        .filter((m) => pickerChecked.has(m.slug))
+        .map((m) => ({ model: m.model, label: m.displayName, description: m.description }));
+      for (const h of pickerTargets) await api.applyCcPicker(h.id, options);
+      setPickerOpen(false);
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  const togglePicker = (slugs: string[], on: boolean) =>
+    setPickerChecked((prev) => {
+      const next = new Set(prev);
+      slugs.forEach((x) => (on ? next.add(x) : next.delete(x)));
+      return next;
+    });
 
   const openFile = useCallback(async (name: string) => {
     if (dirty && !window.confirm("当前文件有未保存的修改，切换后将丢失，继续？")) return;
@@ -284,8 +350,20 @@ export default function CatalogsPage(props: {
     () => enabledHosts.filter((h) => selected.has(h.id)),
     [enabledHosts, selected]
   );
-  const selectedTargets = selectedEnabled.filter((h) => pushable(h).ok);
+  // 选中的主机是用户的明确意图：只要就绪（config.toml 已指向目标路径）就允许推送，含「已最新」的强制重推
+  const selectedTargets = selectedEnabled.filter((h) => readiness(h, props.state[h.id], targetPath).ready && merged !== null);
   const allTargets = enabledHosts.filter((h) => pushable(h).ok);
+
+  const SCOPE_LABEL = { local: "本机", selected: "选中主机", all: "全部主机" } as const;
+  const pickerTargets = useMemo(
+    () =>
+      pickerScope === "local"
+        ? enabledHosts.filter((h) => h.kind === "local")
+        : pickerScope === "selected"
+          ? selectedEnabled
+          : enabledHosts,
+    [pickerScope, enabledHosts, selectedEnabled]
+  );
 
   const pushBatch = async (targets: Host[]) => {
     setPushBusy(true);
@@ -585,6 +663,69 @@ export default function CatalogsPage(props: {
         )}
       </section>
 
+      {pickerOpen && (
+        <div className="modal-mask" onClick={() => setPickerOpen(false)}>
+          <div className="modal picker-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>配置 Claude Code 模型选择器</h3>
+              <button className="ghost" onClick={() => setPickerOpen(false)}>关闭</button>
+            </div>
+            <div className="modal-body">
+              <p className="muted picker-hint">
+                勾选的模型写入目标主机 ~/.claude/settings.json 的 modelPicker.options；不属于 catalog 的手工条目会保留，覆盖前自动备份为 settings.json.bak。OpenAI（GPT）默认不勾选。
+              </p>
+              {pickerModels.length === 0 && <p className="muted">暂无模型，请先拉取 catalog 文件。</p>}
+              {groupByVendor(pickerModels).map(({ vendor, label, models: vms }) => {
+                const slugs = vms.map((m) => m.slug);
+                const n = slugs.filter((x) => pickerChecked.has(x)).length;
+                return (
+                  <div key={vendor} className="picker-vendor-group">
+                    <label className="picker-vendor-label">
+                      <input
+                        type="checkbox"
+                        checked={n === slugs.length}
+                        ref={(el) => { if (el) el.indeterminate = n > 0 && n < slugs.length; }}
+                        onChange={(e) => togglePicker(slugs, e.target.checked)}
+                      />
+                      <strong>{label}</strong>
+                      <span className="muted">{n}/{slugs.length}</span>
+                    </label>
+                    <table className="picker-model-table">
+                      <tbody>
+                        {vms.map((m) => (
+                          <tr key={m.slug}>
+                            <td className="c-check">
+                              <input
+                                type="checkbox"
+                                checked={pickerChecked.has(m.slug)}
+                                onChange={(e) => togglePicker([m.slug], e.target.checked)}
+                                aria-label={m.displayName}
+                              />
+                            </td>
+                            <td className="picker-slug"><code>{m.model}</code></td>
+                            <td className="picker-name">{m.displayName}</td>
+                            <td className="picker-desc muted">{m.description}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })}
+              <div className="modal-actions picker-modal-actions">
+                <span className="muted">
+                  已选 {pickerChecked.size} / {pickerModels.length} · 目标：{SCOPE_LABEL[pickerScope]}（{pickerTargets.length} 台：{pickerTargets.map((h) => h.name).join("、") || "无"}）
+                </span>
+                <button className="ghost" onClick={() => setPickerOpen(false)}>取消</button>
+                <button disabled={pickerSaving || pickerModels.length === 0 || pickerTargets.length === 0} onClick={applyPicker}>
+                  {pickerSaving ? "提交中…" : `写入 ${pickerTargets.length} 台`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ===== 主机推送 ===== */}
       <section className="panel catalog-push">
         <div className="merged-head">
@@ -616,14 +757,37 @@ export default function CatalogsPage(props: {
           <div className="batch-group">
             <button
               disabled={pushBusy || selectedTargets.length === 0}
-              title={selectedTargets.length ? `推送选中的 ${selectedTargets.length} 台` : "选中主机中没有可推送的"}
+              title={selectedTargets.length
+                ? `推送 models.json 到选中的 ${selectedTargets.length} 台（已最新的也会重推；未就绪的跳过）`
+                : selectedEnabled.length ? "选中的主机均未就绪（见右侧 ⓘ）" : "请先勾选主机"}
               onClick={() => pushBatch(selectedTargets)}
             >推送选中</button>
             <button
               disabled={pushBusy || allTargets.length === 0}
-              title={allTargets.length ? `推送全部 ${allTargets.length} 台（跳过已最新/未就绪）` : "所有主机均已最新或未就绪"}
+              title={allTargets.length ? `推送 models.json 到 ${allTargets.length} 台待更新主机（跳过已最新/未就绪）` : "没有待更新的主机：全部已最新或未就绪"}
               onClick={() => pushBatch(allTargets)}
             >推送全部</button>
+          </div>
+          <span className="batchbar-sep" aria-hidden="true" />
+          <div className="batch-group">
+            <button
+              className="ghost"
+              disabled={!enabledHosts.some((h) => h.kind === "local")}
+              title="仅配置本机的 Claude Code 模型选择器（~/.claude/settings.json）"
+              onClick={() => openPicker("local")}
+            >配置本机 CC 模型</button>
+            <button
+              className="ghost"
+              disabled={selectedEnabled.length === 0}
+              title={selectedEnabled.length ? `配置选中的 ${selectedEnabled.length} 台主机的 Claude Code 模型选择器` : "请先勾选主机"}
+              onClick={() => openPicker("selected")}
+            >配置选中</button>
+            <button
+              className="ghost"
+              disabled={enabledHosts.length === 0}
+              title={`配置全部 ${enabledHosts.length} 台已启用主机的 Claude Code 模型选择器`}
+              onClick={() => openPicker("all")}
+            >配置全部</button>
           </div>
         </div>
         <table className="host-table push-table">

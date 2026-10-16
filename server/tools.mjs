@@ -1,4 +1,5 @@
 // 领域逻辑：Codex CLI / Claude Code 的状态检查、npm 更新（含 rename 失败清理重试）、app-server 重启、模型目录推送
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -176,6 +177,141 @@ export async function checkHost(host, onData, catalogTarget = DEFAULT_CATALOG_TA
   const status = parseStatusBlock(result.output);
   if (!status) throw new Error("未能解析状态输出，请检查主机连通性与 prelude 配置");
   return status;
+}
+
+const baseSlug = (model) => String(model).replace(/\[[^\]]*\]$/, "");
+
+/**
+ * 把勾选的 options 合并进 settings 对象的 modelPicker.options：
+ * catalog 内的条目以 options 为准，catalog 之外的手工条目原样保留（排在后面）。
+ */
+export function mergeModelPicker(settings, options, catalogSlugs) {
+  const extras = (settings.modelPicker?.options ?? []).filter((o) => !catalogSlugs.has(baseSlug(o?.model)));
+  return {
+    settings: { ...settings, modelPicker: { ...settings.modelPicker, options: [...options, ...extras] } },
+    kept: extras.length
+  };
+}
+
+/** 解析 settings.json 原文；空文件视为 {}，非法 JSON 直接报错（拒绝覆盖用户手写的坏文件） */
+export function parseSettingsText(raw, where) {
+  if (!raw.trim()) return {};
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) return v;
+  } catch { /* 走下面的统一报错 */ }
+  throw new Error(`${where} 不是合法的 JSON 对象，已中止（未做任何修改）`);
+}
+
+/**
+ * 本机读取：仅 ENOENT 视为「不存在」，权限/IO 等其他错误一律上抛，避免把读取失败当成空配置而覆盖原文件。
+ * 同时返回原文件的权限位（低 9 位），供写回时继承。
+ */
+export async function readTextIfExists(file) {
+  try {
+    const raw = await fs.promises.readFile(file, "utf8");
+    const { mode } = await fs.promises.stat(file);
+    return { exists: true, raw, mode: mode & 0o777 };
+  } catch (err) {
+    if (err?.code === "ENOENT") return { exists: false, raw: "", mode: null };
+    throw new Error(`读取 ${file} 失败（${err.code ?? err.message}），已中止（未做任何修改）`);
+  }
+}
+
+/**
+ * 远程读取脚本。标记里嵌入每次调用随机生成的 nonce：settings.json 的内容不可能事先知道它，
+ * 因此无论配置里写了什么字符串，都不会被误当成协议标记（固定标记会与内容碰撞）。
+ * 文件不存在 → 输出 MISSING 标记；cat 失败 → 非 0 退出。
+ */
+export function buildRemoteSettingsReadScript(nonce) {
+  return [
+    'f="$HOME/.claude/settings.json"',
+    `if [ ! -e "$f" ] && [ ! -L "$f" ]; then echo __CCS_${nonce}_MISSING__; exit 0; fi`,
+    `echo __CCS_${nonce}_BEGIN__`,
+    'cat "$f" || exit 3',
+    "echo",
+    `echo __CCS_${nonce}_END__`
+  ].join("\n");
+}
+
+/**
+ * 解析远程读取结果：{exists, raw}。优先接受完整的 BEGIN/END；ssh 失败、cat 失败、
+ * 或输出里没有本次 nonce 的任何完整标记，均抛错（绝不当作文件不存在）。
+ */
+export function parseRemoteSettingsRead({ code, output }, where, nonce) {
+  if (!/^[0-9a-f]+$/i.test(nonce)) throw new Error("内部错误：nonce 非法");
+  if (code !== 0) throw new Error(`读取 ${where} 失败（退出码 ${code}），已中止（未做任何修改）`);
+  const body = new RegExp(`__CCS_${nonce}_BEGIN__\\r?\\n([\\s\\S]*?)__CCS_${nonce}_END__`).exec(output);
+  if (body) return { exists: true, raw: body[1] };
+  if (new RegExp(`^__CCS_${nonce}_MISSING__\\r?$`, "m").test(output)) return { exists: false, raw: "" };
+  throw new Error(`读取 ${where} 失败（输出不完整），已中止（未做任何修改）`);
+}
+
+/**
+ * 远程写入脚本（stdin 为 base64 内容）。settings.json 可能含 API Key，权限不得放宽：
+ * - umask 077：新建文件默认仅属主可读写；
+ * - 已有文件：mv 前把原 mode 继承给临时文件（GNU 用 --reference，BSD/macOS 回退 stat；都失败则保持 0600）；
+ * - .bak：先删后建再 chmod 600，避免 cp 覆盖到一个已存在的、权限更宽的旧备份上；
+ * - 失败时清理临时文件。
+ */
+export function buildRemoteSettingsWriteScript() {
+  return [
+    "set -e",
+    "umask 077",
+    't="$HOME/.claude/settings.json"',
+    'mkdir -p "$(dirname "$t")"',
+    'tmp="$t.AgentCliHub-$$"',
+    `trap 'command rm -f "$tmp"' EXIT`,
+    'if [ -e "$t" ]; then',
+    '  command rm -f "$t.bak"',
+    '  command cp "$t" "$t.bak"',
+    '  chmod 600 "$t.bak"',
+    "fi",
+    'base64 -d > "$tmp"',
+    'if [ -e "$t" ]; then',
+    '  chmod --reference="$t" "$tmp" 2>/dev/null || chmod "$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null)" "$tmp" 2>/dev/null || true',
+    "fi",
+    'mv -f "$tmp" "$t"',
+    'echo "已写入 $t"'
+  ].join("\n");
+}
+
+/**
+ * 把 modelPicker.options 写入目标主机的 ~/.claude/settings.json（其余字段保持不变，覆盖前备份为 .bak）。
+ * 合并在 hub 侧完成：本机直接用 fs；远程先 ssh cat 读回，再按 pushCatalog 的方式 base64 写回，远端无需 node。
+ */
+export async function applyCcPickerToHost(host, { options, catalogSlugs }, onData) {
+  if (host.kind === "local") {
+    const dest = path.join(os.homedir(), ".claude", "settings.json");
+    const { exists, raw, mode } = await readTextIfExists(dest);
+    const { settings, kept } = mergeModelPicker(parseSettingsText(raw, dest), options, catalogSlugs);
+    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    // 已有文件继承原权限，新文件仅属主可读写；备份一律 0600（POSIX 下生效，Windows 上无副作用）
+    const fileMode = exists ? mode : 0o600;
+    if (exists) {
+      await fs.promises.copyFile(dest, `${dest}.bak`);
+      await fs.promises.chmod(`${dest}.bak`, 0o600);
+    }
+    const tmp = `${dest}.AgentCliHub-tmp`;
+    await fs.promises.rm(tmp, { force: true });
+    await fs.promises.writeFile(tmp, JSON.stringify(settings, null, 2) + "\n", { encoding: "utf8", mode: fileMode });
+    await fs.promises.chmod(tmp, fileMode);
+    await fs.promises.rename(tmp, dest);
+    onData(`已写入 ${dest}：${options.length} 个模型，保留 ${kept} 个手工条目\n`);
+    return { count: options.length, kept };
+  }
+
+  const where = `${host.name} 的 ~/.claude/settings.json`;
+  const nonce = crypto.randomBytes(8).toString("hex");
+  const read = await runRemoteCmd(host.id, buildRemoteSettingsReadScript(nonce), { timeoutMs: 30_000 });
+  const { raw } = parseRemoteSettingsRead(read, where, nonce);
+  const { settings, kept } = mergeModelPicker(parseSettingsText(raw, where), options, catalogSlugs);
+
+  const b64 = Buffer.from(JSON.stringify(settings, null, 2) + "\n", "utf8").toString("base64");
+  const result = await runRemoteCmd(host.id, buildRemoteSettingsWriteScript(), { input: b64, onData, timeoutMs: 30_000 });
+  if (result.code !== 0) throw new Error("远程写入 settings.json 失败，详见日志");
+  onData(`${options.length} 个模型，保留 ${kept} 个手工条目\n`);
+  return { count: options.length, kept };
 }
 
 /**

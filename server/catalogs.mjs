@@ -192,7 +192,7 @@ export function mergeCatalogs({ forceResponsesLiteFalse = true } = {}) {
 
   const catalog = { models: [...merged.values()] };
   const rendered = renderCatalog(catalog);
-  return { rendered, hash: hashText(rendered), modelCount: catalog.models.length, conflicts, catalog };
+  return { rendered, hash: hashText(rendered), modelCount: catalog.models.length, conflicts, catalog, winner };
 }
 
 /** 基线快照：{ hash, models: { slug: modelHash } }，用于计算"较上次推送"的增删改 */

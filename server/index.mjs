@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig, loadState, saveState } from "./store.mjs";
 import { buildHostList, getHost } from "./hosts.mjs";
-import { TOOLS, checkHost, updateTool, restartAppServer, pushCatalog, catalogReadiness } from "./tools.mjs";
+import { TOOLS, checkHost, updateTool, restartAppServer, pushCatalog, catalogReadiness, applyCcPickerToHost } from "./tools.mjs";
 import {
   OAI_NAME,
   listCatalogs,
@@ -256,6 +256,68 @@ app.post("/api/catalogs/:name/pull-official", async (req, res) => {
     res.status(502).json({ error: `拉取失败：${err.message}` });
   }
 });
+// ---------- Claude Code Model Picker 配置 ----------
+// settings.json 路径：~/.claude/settings.json（Windows: %USERPROFILE%\.claude\settings.json）
+const CC_SETTINGS_PATH = path.join(
+  process.env.USERPROFILE || process.env.HOME || "~",
+  ".claude",
+  "settings.json"
+);
+
+/** 读取 settings.json，不存在时返回 {} */
+function readCcSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(CC_SETTINGS_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+const ONE_M = 1_000_000;
+
+/** 合并后的 catalog 模型 → picker 条目；vendor 取自胜出的来源文件（oai/glm/kimi/自定义） */
+function buildModelPickerList(catalogSettings) {
+  const { catalog, winner } = mergeCatalogs(catalogSettings);
+  return [...catalog.models]
+    .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || String(a.slug).localeCompare(String(b.slug)))
+    .map((m) => {
+      const vendor = catalogKey(winner.get(m.slug) ?? "") ?? "custom";
+      const ctx = m.max_context_window ?? m.context_window ?? 0;
+      return {
+        slug: m.slug,
+        // 1M 上下文模型需带 [1m] 后缀，Claude Code 才会按 1M 窗口处理
+        model: ctx >= ONE_M ? `${m.slug}[1m]` : m.slug,
+        displayName: m.display_name ?? m.slug,
+        description: m.description ?? "",
+        vendor,
+        defaultChecked: vendor !== "oai" // GPT（OpenAI 内置 catalog）默认不勾选
+      };
+    });
+}
+
+app.get("/api/cc-model-picker", (req, res) => {
+  try {
+    const models = buildModelPickerList(loadConfig().catalog);
+    const current = readCcSettings().modelPicker?.options ?? [];
+    res.json({ models, current, path: CC_SETTINGS_PATH });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 把前端勾选的 options 写入目标主机（本机或 ssh 远程）的 ~/.claude/settings.json，不经过 hub 本机
+app.post("/api/hosts/:id/cc-picker-apply", (req, res) => {
+  const options = req.body?.options;
+  if (!Array.isArray(options) || options.some((o) => !o || typeof o.model !== "string" || !o.model)) {
+    return res.status(400).json({ error: "options 必须是含非空 model 的数组" });
+  }
+  startTask(req, res, "cc-picker-apply", "配置 Claude Code 模型选择器", async (host, onData) => {
+    const catalogSlugs = new Set(buildModelPickerList(loadConfig().catalog).map((m) => m.slug));
+    const r = await applyCcPickerToHost(host, { options, catalogSlugs }, onData);
+    return `已写入 ${r.count} 个模型（保留 ${r.kept} 个手工条目）`;
+  });
+});
+
 app.post("/api/catalogs/:name/renumber", wrap((req, res) => {
   const start = Number(req.body?.start);
   if (!Number.isInteger(start) || start < 0) return res.status(400).json({ error: "start 必须是非负整数" });
@@ -440,7 +502,7 @@ app.get("/api/tasks/:id", (req, res) => {
 });
 
 /** 同一主机上必须串行的写操作（共用暂存目录 / current 链接 / 配置文件） */
-const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair", "auto-update"]);
+const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair", "auto-update", "cc-picker-apply"]);
 
 /** 启动一个后台任务并立即返回任务 id */
 function startTask(req, res, action, label, run) {

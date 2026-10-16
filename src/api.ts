@@ -1,4 +1,4 @@
-import type { CatalogKeyInfo, CatalogsResponse, Config, HostsResponse, MergedInfo, PreflightResult, PullOfficialResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
+import type { CatalogKeyInfo, CatalogsResponse, CcModelPickerOption, CcModelPickerResponse, Config, HostsResponse, MergedInfo, PreflightResult, PullOfficialResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -94,5 +94,10 @@ export const api = {
       body: JSON.stringify(keys)
     }),
   pushCatalog: (id: string, restart: boolean) =>
-    req<{ taskId: string }>(`/api/hosts/${id}/catalog-push`, json({ restart }))
+    req<{ taskId: string }>(`/api/hosts/${id}/catalog-push`, json({ restart })),
+
+  // ----- Claude Code Model Picker -----
+  getCcModelPicker: () => req<CcModelPickerResponse>("/api/cc-model-picker"),
+  applyCcPicker: (id: string, options: CcModelPickerOption[]) =>
+    req<{ taskId: string }>(`/api/hosts/${id}/cc-picker-apply`, json({ options }))
 };

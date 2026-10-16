@@ -131,6 +131,30 @@ export interface MergedInfo {
   changed: string[];
 }
 
+// ---------- Claude Code Model Picker ----------
+export interface CcModelPickerEntry {
+  slug: string;
+  /** 写入 settings.json 的 model 值（1M 上下文模型带 [1m] 后缀） */
+  model: string;
+  displayName: string;
+  description: string;
+  /** 来源 catalog 文件的 key（oai / glm / kimi / deepseek / 自定义名） */
+  vendor: string;
+  defaultChecked: boolean;
+}
+
+export interface CcModelPickerOption {
+  model: string;
+  label: string;
+  description: string;
+}
+
+export interface CcModelPickerResponse {
+  models: CcModelPickerEntry[];
+  current: CcModelPickerOption[];
+  path: string;
+}
+
 // ---------- 深度探测（M1） ----------
 export interface ProbePathEntry {
   index: number;
