@@ -238,7 +238,9 @@ export function buildRemoteSettingsReadScript(nonce) {
  * 解析远程读取结果：{exists, raw}。优先接受完整的 BEGIN/END；ssh 失败、cat 失败、
  * 或输出里没有本次 nonce 的任何完整标记，均抛错（绝不当作文件不存在）。
  */
-export function parseRemoteSettingsRead({ code, output }, where, nonce) {
+export function parseRemoteSettingsRead(result, where, nonce) {
+  const { code } = result;
+  const output = result.stdout ?? result.output;
   if (!/^[0-9a-f]+$/i.test(nonce)) throw new Error("内部错误：nonce 非法");
   if (code !== 0) throw new Error(`读取 ${where} 失败（退出码 ${code}），已中止（未做任何修改）`);
   const body = new RegExp(`__CCS_${nonce}_BEGIN__\\r?\\n([\\s\\S]*?)__CCS_${nonce}_END__`).exec(output);

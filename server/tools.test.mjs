@@ -241,4 +241,14 @@ if (!home) {
   }
 }
 
+console.log("测试 25：ssh stderr 诊断不会混入 Claude settings 内容");
+{
+  const clean = wrap('{"keep":1}');
+  const diagnostic = "client_global_hostkeys_prove_confirm: server gave bad signature for RSA key 0: incorrect signature";
+  const combined = clean.replace('{"keep":1}', `{"keep":1}\n${diagnostic}`);
+  const r = parseRemoteSettingsRead({ code: 0, stdout: clean, stderr: diagnostic, output: combined }, "host7", N);
+  assert.strictEqual(r.exists, true);
+  assert.deepStrictEqual(parseSettingsText(r.raw, "host7"), { keep: 1 });
+}
+
 console.log("✅ 全部测试通过");

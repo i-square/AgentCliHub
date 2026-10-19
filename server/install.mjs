@@ -245,31 +245,45 @@ async function claudeArtifact(host, version, config, onData) {
 
 // ---------- 远程文件读写（配置接管用） ----------
 
+const REMOTE_READ_MARKERS = Object.freeze({
+  sentinel: "__ACH_NOFILE_7f3d__",
+  begin: "__ACH_BEGIN_7f3d__",
+  end: "__ACH_END_7f3d__",
+  fail: "__ACH_READFAIL_7f3d__"
+});
+
+/**
+ * 解析远程读取结果。结构化内容只取 stdout：ssh 自身诊断走 stderr，不能与远端文件内容交错合并。
+ * 保留 output 作为旧调用方/测试的兼容输入，错误摘要仍使用合并输出。
+ */
+export function parseRemoteReadResult(r) {
+  const { sentinel, begin, end, fail } = REMOTE_READ_MARKERS;
+  const protocolOutput = r.stdout ?? r.output;
+  const why = (reason) => ({ state: "error", reason: `${reason}；原始输出前 160 字符: ${JSON.stringify(r.output.slice(0, 160))}` });
+  if (r.code !== 0) return why(`ssh 退出码 ${r.code}`);
+  if (protocolOutput.includes(fail)) return why("cat 读取失败（权限？）");
+  if (protocolOutput.includes(sentinel)) return { state: "missing" };
+  const crlfTransport = protocolOutput.includes(`${begin}\r\n`);
+  const m = new RegExp(`${begin}\\r?\\n([\\s\\S]*?)\\r?\\n?${end}`).exec(protocolOutput);
+  if (!m) return why("找不到内容标记"); // 宁可不写
+  return { state: "ok", content: crlfTransport ? m[1].replace(/\r\n/g, "\n") : m[1] };
+}
+
 /**
  * 三态读取：ok(content) / missing(文件不存在，可新建) / error(读取失败或输出无法解析，不得写入；reason 说明原因)
  * 兼容 CRLF 传输：部分主机（如 Windows sshd 转发到 WSL）会把 \n 转成 \r\n，此时标记行以 \r\n 结尾，
  * 内容里每个 \n 也被加了 \r，需整体还原（原文件自带的 \r\n 传输后是 \r\r\n，还原一次即得到原样）。
  */
 async function remoteReadText(host, pathExpr) {
-  const sentinel = "__ACH_NOFILE_7f3d__";
-  const begin = "__ACH_BEGIN_7f3d__";
-  const end = "__ACH_END_7f3d__";
-  const fail = "__ACH_READFAIL_7f3d__";
-  // 用 begin/end 标记包裹内容，隔离 ssh 横幅/警告等 stdout 噪音（如 hostkeys_prove_confirm）；
-  // cat 失败（如无权限）单独打失败标记，避免把报错文字当成文件内容
+  const { sentinel, begin, end, fail } = REMOTE_READ_MARKERS;
+  // 用 begin/end 标记包裹内容；解析时只读 stdout，隔离 ssh 横幅/hostkeys 等 stderr 诊断。
+  // cat 失败（如无权限）单独打失败标记，避免把报错文字当成文件内容。
   const r = await runRemoteCmd(
     host.id,
     `if [ -f ${pathExpr} ]; then printf '%s\\n' '${begin}'; if cat -- ${pathExpr}; then printf '\\n%s\\n' '${end}'; else printf '\\n%s\\n' '${fail}'; fi; else printf '%s' '${sentinel}'; fi`,
     { timeoutMs: 30_000 }
   );
-  const why = (reason) => ({ state: "error", reason: `${reason}；原始输出前 160 字符: ${JSON.stringify(r.output.slice(0, 160))}` });
-  if (r.code !== 0) return why(`ssh 退出码 ${r.code}`);
-  if (r.output.includes(fail)) return why("cat 读取失败（权限？）");
-  if (r.output.includes(sentinel)) return { state: "missing" };
-  const crlfTransport = r.output.includes(`${begin}\r\n`);
-  const m = new RegExp(`${begin}\\r?\\n([\\s\\S]*?)\\r?\\n?${end}`).exec(r.output);
-  if (!m) return why("找不到内容标记"); // 宁可不写
-  return { state: "ok", content: crlfTransport ? m[1].replace(/\r\n/g, "\n") : m[1] };
+  return parseRemoteReadResult(r);
 }
 
 /** 读取接管目标文件（本机/远程统一为三态） */

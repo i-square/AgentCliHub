@@ -8,32 +8,36 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
  * @param {string[]} args
  * @param {{onData?: (chunk: string) => void, timeoutMs?: number, input?: string | Buffer}} opts
  *   input：写入子进程 stdin 后关闭（用于经 ssh 向远程传输文件内容，避免命令行长度上限）
- * @returns {Promise<{code: number, output: string}>}
+ * @returns {Promise<{code: number, output: string, stdout: string, stderr: string}>}
  */
 function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { windowsHide: true });
     let output = "";
+    let stdout = "";
+    let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       onData?.(`\n[timeout] 命令超过 ${Math.round(timeoutMs / 1000)}s，已终止\n`);
     }, timeoutMs);
 
-    const handle = (chunk) => {
+    const handle = (chunk, stream) => {
       const text = chunk.toString();
       output += text;
+      if (stream === "stdout") stdout += text;
+      else stderr += text;
       onData?.(text);
     };
-    child.stdout.on("data", handle);
-    child.stderr.on("data", handle);
+    child.stdout.on("data", (chunk) => handle(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => handle(chunk, "stderr"));
     child.on("error", (err) => {
       clearTimeout(timer);
       onData?.(`\n[spawn error] ${err.message}\n`);
-      resolve({ code: -1, output });
+      resolve({ code: -1, output, stdout, stderr });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, output });
+      resolve({ code: code ?? -1, output, stdout, stderr });
     });
     if (input !== undefined) {
       child.stdin.on("error", () => {}); // 远程提前退出时忽略 EPIPE
