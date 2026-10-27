@@ -37,9 +37,10 @@ export interface HostState {
 }
 
 export interface CatalogSources {
-  glm: { url: string };
-  kimi: { url: string };
-  deepseek: { url: string };
+  glm: { url: string; backupUrl: string };
+  kimi: { url: string; backupUrl: string };
+  deepseek: { url: string; backupUrl: string };
+  /** 旧版三家共用配置，仅用于兼容读取 */
   ccswitch: { url: string };
 }
 
@@ -62,6 +63,12 @@ export interface PullOfficialResult {
   channel: "official" | "ccswitch";
   note: string;
   models: string[];
+}
+
+export interface CatalogDescriptionModel {
+  slug: string;
+  displayName: string;
+  description: string;
 }
 
 export interface Config {

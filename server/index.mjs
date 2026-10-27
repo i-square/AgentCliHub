@@ -104,6 +104,20 @@ app.put("/api/settings", (req, res) => {
     if (typeof catalog.sourceUrl === "string" && catalog.sourceUrl.trim()) config.catalog.sourceUrl = catalog.sourceUrl.trim();
     if (typeof catalog.targetPath === "string" && catalog.targetPath.trim()) config.catalog.targetPath = catalog.targetPath.trim();
     if (typeof catalog.forceResponsesLiteFalse === "boolean") config.catalog.forceResponsesLiteFalse = catalog.forceResponsesLiteFalse;
+    if (catalog.sources && typeof catalog.sources === "object") {
+      for (const key of ["glm", "kimi", "deepseek", "ccswitch"]) {
+        const url = catalog.sources[key]?.url;
+        if (typeof url !== "string") continue;
+        if (!url.trim()) return res.status(400).json({ error: `${key} 源地址不能为空` });
+        config.catalog.sources[key].url = url.trim();
+      }
+      for (const key of ["glm", "kimi", "deepseek"]) {
+        const backupUrl = catalog.sources[key]?.backupUrl;
+        if (typeof backupUrl !== "string") continue;
+        if (!backupUrl.trim()) return res.status(400).json({ error: `${key} 三方源地址不能为空` });
+        config.catalog.sources[key].backupUrl = backupUrl.trim();
+      }
+    }
   }
   const { versions, download } = req.body ?? {};
   if (versions && typeof versions === "object") {
@@ -172,6 +186,39 @@ app.get("/api/catalogs/merged", (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+function catalogDescriptionModels(name) {
+  return parseCatalogText(readCatalogText(name)).models.map((m) => ({
+    slug: m.slug,
+    displayName: m.display_name ?? m.slug,
+    description: m.description ?? ""
+  }));
+}
+
+app.get("/api/catalogs/:name/descriptions", wrap((req, res) => {
+  res.json({ name: req.params.name, models: catalogDescriptionModels(req.params.name) });
+}));
+
+app.put("/api/catalogs/:name/descriptions", wrap((req, res) => {
+  const input = req.body?.models;
+  if (!Array.isArray(input)) return res.status(400).json({ error: "models 必须是数组" });
+  const catalog = parseCatalogText(readCatalogText(req.params.name));
+  const bySlug = new Map(catalog.models.map((m) => [m.slug, m]));
+  const updates = new Map();
+  for (const item of input) {
+    if (!item || typeof item.slug !== "string" || typeof item.description !== "string") {
+      return res.status(400).json({ error: "每项必须包含 slug 与 description 字符串" });
+    }
+    if (!bySlug.has(item.slug)) return res.status(400).json({ error: `模型不存在: ${item.slug}` });
+    if (updates.has(item.slug)) return res.status(400).json({ error: `模型重复: ${item.slug}` });
+    updates.set(item.slug, item.description);
+  }
+  for (const model of catalog.models) {
+    if (updates.has(model.slug)) model.description = updates.get(model.slug);
+  }
+  const file = writeCatalog(req.params.name, JSON.stringify(catalog));
+  res.json({ ok: true, file, models: catalogDescriptionModels(req.params.name) });
+}));
 
 app.get("/api/catalogs/:name", (req, res) => {
   try {
@@ -582,13 +629,15 @@ app.post("/api/hosts/:id/catalog-push", (req, res) =>
     }
     await pushCatalog(host, merged.rendered, { targetPath: config.catalog.targetPath, onData });
 
-    state.catalogBaseline = baselineFrom(merged);
-    state.hosts[host.id] = {
-      ...state.hosts[host.id],
+    // 推送可能与其他主机并发完成，写回前重读，避免旧快照覆盖其他主机的新 hash
+    const latestState = loadState();
+    latestState.catalogBaseline = baselineFrom(merged);
+    latestState.hosts[host.id] = {
+      ...latestState.hosts[host.id],
       catalogHash: merged.hash,
       catalogPushedAt: new Date().toISOString()
     };
-    saveState(state);
+    saveState(latestState);
 
     if (req.body?.restart) {
       await restartAppServer(host, onData);

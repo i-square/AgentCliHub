@@ -138,7 +138,7 @@ input[type="checkbox"]:disabled { cursor: not-allowed; }
 }
 .ver-actions { display: flex; align-items: center; gap: 6px; min-height: 26px; margin-top: 4px; flex-wrap: wrap; }
 .ver-actions button, .ver-actions .badge, .ver-actions .link, .actions-cell button { white-space: nowrap; flex: none; }
-.badge { white-space: nowrap; } 
+.badge { white-space: nowrap;
   font-size: 11px; border-radius: 4px; padding: 1px 7px;
   display: inline-block; min-width: 5em; text-align: center;
 }
@@ -325,6 +325,24 @@ button.link:disabled { color: var(--muted); cursor: default; }
 
 .modal-body { overflow-y: auto; padding: 12px 18px 16px; }
 .modal-body .modal-actions { margin-top: 12px; }
+
+/* ===== catalog 源配置与逐模型描述 ===== */
+.source-modal { width: min(680px, 94vw); }
+.source-modal input { width: 100%; box-sizing: border-box; }
+.description-modal { width: min(860px, 94vw); }
+.description-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.description-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.description-model { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; flex-wrap: wrap; }
+.description-model code { color: var(--text); }
+.description-model > span:not(.tag) { color: var(--muted); font-size: 12px; }
+.description-row textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 52px;
+  background: var(--input-bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px; font: 13px/1.5 inherit;
+}
+.description-row textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.description-actions { align-items: center; }
+.description-actions .muted { margin-right: auto; }
 
 /* ===== Claude Code Model Picker 弹窗 ===== */
 .picker-modal { width: min(920px, 94vw); }

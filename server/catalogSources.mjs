@@ -161,9 +161,9 @@ function kimiEntryToCodex(m, prev) {
     // 以已有条目为模板（保留用户对工具链字段的调整），否则用通用模板
     ...(prev ?? CODEX_TEMPLATE),
     slug: m.id,
-    // 展示文案保留用户修改；新条目用厂商 display_name
+    // 展示名称保留用户修改；description 源里有则用源，否则回落本地
     display_name: prev?.display_name ?? m.display_name ?? m.id,
-    description: prev?.description ?? "",
+    description: m.description?.trim() ? m.description : (prev?.description ?? ""),
     // 以下字段以官方返回为准
     default_reasoning_level: effort.def ?? "max",
     supported_reasoning_levels: levels,
@@ -229,7 +229,7 @@ function mapCcswitchEffort(levels) {
 }
 
 /** 从 codexProviderPresets.ts 源码中定位指定预设的 modelCatalog([...]) 块并解析 */
-async function pullCcSwitch(sourceUrl, vendor) {
+async function pullCcSwitch(sourceUrl, vendor, existingModels = []) {
   const preset = CCSWITCH_PRESETS[vendor];
   if (!preset) throw new Error(`CC Switch 备用通道不支持: ${vendor}`);
   const src = await fetchText(sourceUrl, { timeout: 60_000 });
@@ -240,7 +240,8 @@ async function pullCcSwitch(sourceUrl, vendor) {
   if (!block) throw new Error(`预设「${preset.presetName}」中未找到 modelCatalog 块`);
   const entries = parseTsObjectArray(block);
   if (!entries.length) throw new Error(`预设「${preset.presetName}」modelCatalog 解析结果为空`);
-  const models = entries.map((e) => ccswitchEntryToCodex(e));
+  const bySlug = new Map(existingModels.map((m) => [m.slug, m]));
+  const models = entries.map((e) => ccswitchEntryToCodex(e, bySlug.get(e.model)));
   return {
     catalog: { models },
     note: "来自 CC Switch 社区预设（人工核对、可能滞后于官方），建议配置 key 后改用官方通道复核"
@@ -292,7 +293,7 @@ function parseTsObjectArray(literal) {
   }
 }
 
-function ccswitchEntryToCodex(e) {
+function ccswitchEntryToCodex(e, prev) {
   const levels = mapCcswitchEffort(e.reasoningLevels).map((effort) => ({
     effort,
     description: EFFORT_DESC[effort] ?? effort
@@ -304,7 +305,7 @@ function ccswitchEntryToCodex(e) {
     ...CODEX_TEMPLATE,
     slug: e.model,
     display_name: e.displayName ?? e.model,
-    description: "",
+    description: e.description?.trim() ? e.description : (prev?.description ?? ""),
     default_reasoning_level: e.defaultReasoningLevel ?? (levels.length ? levels[0].effort : "max"),
     supported_reasoning_levels: levels,
     ...(thinkingTypes.length ? { supported_thinking_types: thinkingTypes } : {}),
@@ -332,7 +333,7 @@ export async function pullVendorCatalog(vendor, { channel = "auto", sources = {}
   const needsKey = vendor === "glm" || vendor === "kimi";
   const key = loadCatalogKeys()[vendor];
   const officialUrl = sources[vendor]?.url;
-  const ccswitchUrl = sources.ccswitch?.url;
+  const ccswitchUrl = sources[vendor]?.backupUrl || sources.ccswitch?.url;
 
   const tryOfficial = async () => {
     if (!officialUrl) throw new Error(`未配置 ${vendor} 官方源地址`);
@@ -343,7 +344,7 @@ export async function pullVendorCatalog(vendor, { channel = "auto", sources = {}
   };
   const tryBackup = () => {
     if (!ccswitchUrl) throw new Error("未配置 CC Switch 备用源地址");
-    return pullCcSwitch(ccswitchUrl, vendor);
+    return pullCcSwitch(ccswitchUrl, vendor, existingModels);
   };
 
   if (channel === "official") {

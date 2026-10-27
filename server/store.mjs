@@ -73,6 +73,8 @@ function writeJson(file, value) {
 export function loadConfig() {
   const raw = readJson(configFile, {});
   const defaults = structuredClone(DEFAULT_CONFIG);
+  // 旧配置只有共用 ccswitch.url：首次读取时映射为三家各自 backupUrl，后续可独立修改
+  const legacyBackupUrl = raw.catalog?.sources?.ccswitch?.url ?? defaults.catalog.sources.ccswitch.url;
   return {
     ...defaults,
     ...raw,
@@ -94,9 +96,9 @@ export function loadConfig() {
       sources: {
         ...defaults.catalog.sources,
         ...(raw.catalog?.sources ?? {}),
-        glm: { ...defaults.catalog.sources.glm, ...(raw.catalog?.sources?.glm ?? {}) },
-        kimi: { ...defaults.catalog.sources.kimi, ...(raw.catalog?.sources?.kimi ?? {}) },
-        deepseek: { ...defaults.catalog.sources.deepseek, ...(raw.catalog?.sources?.deepseek ?? {}) },
+        glm: { ...defaults.catalog.sources.glm, backupUrl: legacyBackupUrl, ...(raw.catalog?.sources?.glm ?? {}) },
+        kimi: { ...defaults.catalog.sources.kimi, backupUrl: legacyBackupUrl, ...(raw.catalog?.sources?.kimi ?? {}) },
+        deepseek: { ...defaults.catalog.sources.deepseek, backupUrl: legacyBackupUrl, ...(raw.catalog?.sources?.deepseek ?? {}) },
         ccswitch: { ...defaults.catalog.sources.ccswitch, ...(raw.catalog?.sources?.ccswitch ?? {}) }
       }
     }

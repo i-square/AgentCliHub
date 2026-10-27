@@ -1,4 +1,4 @@
-import type { CatalogKeyInfo, CatalogsResponse, CcModelPickerOption, CcModelPickerResponse, Config, HostsResponse, MergedInfo, PreflightResult, PullOfficialResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
+import type { CatalogDescriptionModel, CatalogKeyInfo, CatalogsResponse, CcModelPickerOption, CcModelPickerResponse, Config, HostsResponse, MergedInfo, PreflightResult, PullOfficialResult, Task, ToolVersions, ToolVersionsResponse } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -77,6 +77,14 @@ export const api = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content })
+    }),
+  getCatalogDescriptions: (name: string) =>
+    req<{ name: string; models: CatalogDescriptionModel[] }>(`/api/catalogs/${encodeURIComponent(name)}/descriptions`),
+  saveCatalogDescriptions: (name: string, models: { slug: string; description: string }[]) =>
+    req<{ ok: true }>(`/api/catalogs/${encodeURIComponent(name)}/descriptions`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models })
     }),
   createCatalog: (key: string) => req<{ ok: true }>("/api/catalogs", json({ key })),
   deleteCatalog: (name: string) =>
