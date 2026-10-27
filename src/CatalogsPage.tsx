@@ -3,7 +3,7 @@ import CodeMirror from "@uiw/react-codemirror";
 import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { linter, lintGutter } from "@codemirror/lint";
 import { api } from "./api";
-import { CatalogDescriptionModal, CatalogSourceModal } from "./CatalogModals";
+import { CatalogDescriptionModal, CatalogPriorityModal, CatalogSourceModal } from "./CatalogModals";
 import type {
   CatalogFileInfo,
   CatalogKeyInfo,
@@ -108,6 +108,7 @@ export default function CatalogsPage(props: {
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
   const [sourceFor, setSourceFor] = useState<"glm" | "kimi" | "deepseek" | null>(null);
   const [descriptionsFor, setDescriptionsFor] = useState<string | null>(null);
+  const [prioritiesFor, setPrioritiesFor] = useState<string | null>(null);
   // CC Model Picker
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerScope, setPickerScope] = useState<"local" | "selected" | "all">("all");
@@ -538,6 +539,7 @@ export default function CatalogsPage(props: {
                           <>
                             <button className="ghost" onClick={() => setSourceFor(vendor)}>源配置</button>
                             <button className="ghost" disabled={!f.valid} onClick={() => setDescriptionsFor(f.name)}>模型描述</button>
+                            <button className="ghost" disabled={!f.valid} onClick={() => setPrioritiesFor(f.name)}>模型优先级</button>
                           </>
                         )}
                         {f.isBuiltin ? (
@@ -690,6 +692,21 @@ export default function CatalogsPage(props: {
           onSaved={async () => {
             await Promise.all([loadFiles(), loadMerged()]);
             if (activeName && activeName === descriptionsFor) {
+              const data = await api.getCatalog(activeName);
+              setContent(data.content);
+              setSavedContent(data.content);
+            }
+          }}
+        />
+      )}
+
+      {prioritiesFor && (
+        <CatalogPriorityModal
+          name={prioritiesFor}
+          onClose={() => setPrioritiesFor(null)}
+          onSaved={async () => {
+            await Promise.all([loadFiles(), loadMerged()]);
+            if (activeName && activeName === prioritiesFor) {
               const data = await api.getCatalog(activeName);
               setContent(data.content);
               setSavedContent(data.content);

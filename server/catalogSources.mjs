@@ -164,6 +164,8 @@ function kimiEntryToCodex(m, prev) {
     // 展示名称保留用户修改；description 源里有则用源，否则回落本地
     display_name: prev?.display_name ?? m.display_name ?? m.id,
     description: m.description?.trim() ? m.description : (prev?.description ?? ""),
+    // 官方有 priority 时覆盖，否则沿用本地相对优先级（由调用方从分段绝对值转换）
+    priority: m.priority ?? prev?.priority,
     // 以下字段以官方返回为准
     default_reasoning_level: effort.def ?? "max",
     supported_reasoning_levels: levels,
@@ -306,6 +308,7 @@ function ccswitchEntryToCodex(e, prev) {
     slug: e.model,
     display_name: e.displayName ?? e.model,
     description: e.description?.trim() ? e.description : (prev?.description ?? ""),
+    priority: e.priority ?? prev?.priority,
     default_reasoning_level: e.defaultReasoningLevel ?? (levels.length ? levels[0].effort : "max"),
     supported_reasoning_levels: levels,
     ...(thinkingTypes.length ? { supported_thinking_types: thinkingTypes } : {}),

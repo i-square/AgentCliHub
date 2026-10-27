@@ -18,6 +18,7 @@ import {
   mergeCatalogs,
   baselineFrom,
   summarize,
+  applyPriorityBand,
   renumber,
   isValidName,
   catalogKey
@@ -220,6 +221,53 @@ app.put("/api/catalogs/:name/descriptions", wrap((req, res) => {
   res.json({ ok: true, file, models: catalogDescriptionModels(req.params.name) });
 }));
 
+function catalogPrioritySettings(name) {
+  const key = catalogKey(name);
+  const [start, end] = loadConfig().catalog.priorities[key] ?? [];
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) {
+    throw new Error(`catalog ${name} 未配置有效的 priority 分段`);
+  }
+  return { start, maxPriority: end - start };
+}
+
+function catalogPriorityModels(name, start) {
+  return parseCatalogText(readCatalogText(name)).models.map((m, index) => ({
+    slug: m.slug,
+    displayName: m.display_name ?? m.slug,
+    priority: typeof m.priority === "number" && Number.isFinite(m.priority) ? m.priority - start : index
+  }));
+}
+
+app.get("/api/catalogs/:name/priorities", wrap((req, res) => {
+  const { start, maxPriority } = catalogPrioritySettings(req.params.name);
+  res.json({ name: req.params.name, models: catalogPriorityModels(req.params.name, start), maxPriority });
+}));
+
+app.put("/api/catalogs/:name/priorities", wrap((req, res) => {
+  const input = req.body?.models;
+  if (!Array.isArray(input)) return res.status(400).json({ error: "models 必须是数组" });
+  const { start, maxPriority } = catalogPrioritySettings(req.params.name);
+  const catalog = parseCatalogText(readCatalogText(req.params.name));
+  const bySlug = new Map(catalog.models.map((m) => [m.slug, m]));
+  const updates = new Map();
+  for (const item of input) {
+    if (!item || typeof item.slug !== "string" || !Number.isInteger(item.priority)) {
+      return res.status(400).json({ error: "每项必须包含 slug 与整数 priority" });
+    }
+    if (item.priority < 0 || item.priority > maxPriority) {
+      return res.status(400).json({ error: `${item.slug} 的 priority 必须在 0～${maxPriority} 之间` });
+    }
+    if (!bySlug.has(item.slug)) return res.status(400).json({ error: `模型不存在: ${item.slug}` });
+    if (updates.has(item.slug)) return res.status(400).json({ error: `模型重复: ${item.slug}` });
+    updates.set(item.slug, item.priority);
+  }
+  for (const model of catalog.models) {
+    if (updates.has(model.slug)) model.priority = start + updates.get(model.slug);
+  }
+  const file = writeCatalog(req.params.name, JSON.stringify(catalog));
+  res.json({ ok: true, file, models: catalogPriorityModels(req.params.name, start), maxPriority });
+}));
+
 app.get("/api/catalogs/:name", (req, res) => {
   try {
     res.json({ name: req.params.name, content: readCatalogText(req.params.name) });
@@ -267,7 +315,7 @@ app.put("/api/catalog-keys", wrap((req, res) => {
 }));
 
 
-// 从厂商官方源拉取 catalog 并覆盖写入（写入后按优先级分段起点重排）。
+// 源 priority 优先，缺失时继承本地相对值；新模型按返回顺序编号，最后统一加分段起点。
 // body.channel: "auto"（默认，官方优先、失败回落 CC Switch）| "official" | "ccswitch"
 app.post("/api/catalogs/:name/pull-official", async (req, res) => {
   try {
@@ -278,20 +326,37 @@ app.post("/api/catalogs/:name/pull-official", async (req, res) => {
     }
     const channel = ["auto", "official", "ccswitch"].includes(req.body?.channel) ? req.body.channel : "auto";
     const config = loadConfig();
-    // Kimi 映射需要现有条目来保留展示文案；文件不存在时按空处理
+    const bandStart = config.catalog.priorities[key]?.[0];
+    const hasBand = Number.isInteger(bandStart);
+    // 本地 priority 转回分段内相对值，供源缺少 priority 时继承；Kimi 同时保留展示文案。
     let existingModels = [];
     try {
       existingModels = parseCatalogText(readCatalogText(name)).models;
     } catch { /* 文件不存在或无效时使用空模板 */ }
+    if (hasBand) {
+      existingModels = existingModels.map((m) => ({
+        ...m,
+        priority: typeof m.priority === "number" && Number.isFinite(m.priority) ? m.priority - bandStart : undefined
+      }));
+    }
     const result = await pullVendorCatalog(key, {
       channel,
       sources: config.catalog.sources,
       existingModels
     });
-    const file = writeCatalog(name, JSON.stringify(result.catalog));
-    // 按该厂商优先级分段起点重排，避免覆盖厂商原始 priority 后与合并分段冲突
-    const bandStart = config.catalog.priorities[key]?.[0];
-    const finalFile = Number.isInteger(bandStart) ? renumber(name, bandStart) : file;
+    const localBySlug = new Map(existingModels.map((m) => [m.slug, m]));
+    // 所有厂商统一兜底：源无 priority 时沿用本地手动值；新模型再由 applyPriorityBand 按返回顺序编号。
+    const withLocalPriority = {
+      ...result.catalog,
+      models: result.catalog.models.map((m) => ({
+        ...m,
+        priority: typeof m.priority === "number" && Number.isFinite(m.priority)
+          ? m.priority
+          : localBySlug.get(m.slug)?.priority
+      }))
+    };
+    const finalCatalog = hasBand ? applyPriorityBand(withLocalPriority, bandStart) : withLocalPriority;
+    const finalFile = writeCatalog(name, JSON.stringify(finalCatalog));
     res.json({
       ok: true,
       file: finalFile,

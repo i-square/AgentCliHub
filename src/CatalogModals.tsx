@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { CatalogDescriptionModel, CatalogSources } from "./types";
+import type { CatalogDescriptionModel, CatalogPriorityModel, CatalogSources } from "./types";
 
 type Vendor = "glm" | "kimi" | "deepseek";
 
@@ -143,6 +143,95 @@ export function CatalogDescriptionModal(props: {
         <button className="ghost" onClick={props.onClose}>取消</button>
         <button disabled={saving || loading || changedCount === 0} onClick={save}>
           {saving ? "保存中…" : "保存描述"}
+        </button>
+      </div>
+    </ModalFrame>
+  );
+}
+
+export function CatalogPriorityModal(props: {
+  name: string;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [models, setModels] = useState<CatalogPriorityModel[]>([]);
+  const [original, setOriginal] = useState<number[]>([]);
+  const [maxPriority, setMaxPriority] = useState(100);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getCatalogPriorities(props.name)
+      .then((data) => {
+        if (cancelled) return;
+        setModels(data.models);
+        setOriginal(data.models.map((m) => m.priority));
+        setMaxPriority(data.maxPriority);
+      })
+      .catch((e) => { if (!cancelled) setError((e as Error).message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [props.name]);
+
+  const changedCount = models.filter((m, i) => m.priority !== original[i]).length;
+  const invalid = models.some((m) => !Number.isInteger(m.priority) || m.priority < 0 || m.priority > maxPriority);
+  const update = (index: number, raw: string) => {
+    const priority = raw.trim() === "" ? Number.NaN : Number(raw);
+    setModels((prev) => prev.map((m, i) => i === index ? { ...m, priority } : m));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.saveCatalogPriorities(props.name, models.map(({ slug, priority }) => ({ slug, priority })));
+      await props.onSaved();
+      props.onClose();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ModalFrame title={`${props.name} · 模型优先级`} onClose={props.onClose} className="priority-modal">
+      <p className="muted">设置厂商分段内的相对优先级，数值越小越靠前。允许 0～{maxPriority} 的整数；保存和拉取时会自动应用分段起点。</p>
+      {loading && <p className="muted">正在读取模型…</p>}
+      {!loading && models.length === 0 && !error && <p className="muted">该文件没有模型。</p>}
+      <div className="priority-list">
+        {models.map((m, index) => {
+          const itemInvalid = !Number.isInteger(m.priority) || m.priority < 0 || m.priority > maxPriority;
+          return (
+            <div className="priority-row" key={m.slug}>
+              <div className="priority-model">
+                <code>{m.slug}</code>
+                <span>{m.displayName}</span>
+              </div>
+              <input
+                type="number"
+                min={0}
+                max={maxPriority}
+                step={1}
+                value={Number.isNaN(m.priority) ? "" : m.priority}
+                aria-label={`${m.slug} 的 priority`}
+                aria-invalid={itemInvalid}
+                onChange={(e) => update(index, e.target.value)}
+              />
+              {m.priority !== original[index] && <span className="tag">待保存</span>}
+            </div>
+          );
+        })}
+      </div>
+      {invalid && <p className="error-text">priority 必须是 0～{maxPriority} 之间的整数。</p>}
+      {error && <p className="error-text">{error}</p>}
+      <div className="modal-actions description-actions">
+        <span className="muted">{changedCount ? `${changedCount} 项待保存` : "暂无修改"}</span>
+        <button className="ghost" onClick={props.onClose}>取消</button>
+        <button disabled={saving || loading || invalid || changedCount === 0} onClick={save}>
+          {saving ? "保存中…" : "保存优先级"}
         </button>
       </div>
     </ModalFrame>

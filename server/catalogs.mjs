@@ -217,6 +217,20 @@ export function summarize(baseline, merged) {
   };
 }
 
+/**
+ * 应用厂商分段起点：源中有 priority 时保留相对值并加起点；
+ * 没有时按源返回顺序从起点顺次编号。不改变模型数组顺序，也不修改输入对象。
+ */
+export function applyPriorityBand(catalog, rangeStart) {
+  return {
+    ...catalog,
+    models: catalog.models.map((model, index) => ({
+      ...model,
+      priority: rangeStart + (typeof model.priority === "number" && Number.isFinite(model.priority) ? model.priority : index)
+    }))
+  };
+}
+
 /** 按 (priority, slug) 排序后从 rangeStart 顺序重写 priority */
 export function renumber(name, rangeStart) {
   const file = catalogPath(name);

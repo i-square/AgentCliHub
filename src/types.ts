@@ -71,6 +71,20 @@ export interface CatalogDescriptionModel {
   description: string;
 }
 
+export interface CatalogPriorityModel {
+  slug: string;
+  displayName: string;
+  /** 厂商分段内的相对优先级，不含分段起点 */
+  priority: number;
+}
+
+export interface CatalogPrioritiesResponse {
+  name: string;
+  models: CatalogPriorityModel[];
+  /** 当前分段允许的最大相对优先级 */
+  maxPriority: number;
+}
+
 export interface Config {
   excludePatterns: string[];
   hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string; preferRelay?: boolean }>;

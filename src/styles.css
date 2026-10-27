@@ -343,6 +343,14 @@ button.link:disabled { color: var(--muted); cursor: default; }
 .description-row textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .description-actions { align-items: center; }
 .description-actions .muted { margin-right: auto; }
+.priority-modal { width: min(760px, 94vw); }
+.priority-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.priority-row { display: grid; grid-template-columns: minmax(0, 1fr) 100px auto; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; }
+.priority-model { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.priority-model code { overflow-wrap: anywhere; }
+.priority-model span { color: var(--muted); font-size: 12px; }
+.priority-row input { width: 100px; box-sizing: border-box; }
+.priority-row input[aria-invalid="true"] { border-color: var(--red); outline-color: var(--red); }
 
 /* ===== Claude Code Model Picker 弹窗 ===== */
 .picker-modal { width: min(920px, 94vw); }
