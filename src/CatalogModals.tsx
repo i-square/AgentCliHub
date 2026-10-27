@@ -166,8 +166,10 @@ export function CatalogPriorityModal(props: {
     api.getCatalogPriorities(props.name)
       .then((data) => {
         if (cancelled) return;
-        setModels(data.models);
-        setOriginal(data.models.map((m) => m.priority));
+        // 文件按 slug 稳定存储；弹窗按用户设置的相对优先级展示
+        const sorted = [...data.models].sort((a, b) => a.priority - b.priority || a.slug.localeCompare(b.slug));
+        setModels(sorted);
+        setOriginal(sorted.map((m) => m.priority));
         setMaxPriority(data.maxPriority);
       })
       .catch((e) => { if (!cancelled) setError((e as Error).message); })
