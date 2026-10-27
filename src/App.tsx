@@ -28,6 +28,49 @@ interface TaskWithLog extends Task {
   log?: string;
 }
 
+type ProbeContext = "shell" | "interactive" | "login";
+
+interface ToolDisplay {
+  current: string;
+  installed: boolean;
+  candidate?: ProbeResult["candidates"][number];
+  context?: ProbeContext;
+  path?: string;
+}
+
+/** 列表优先使用检查结果；SSH 非交互 shell 未命中时，回退到深度探测的用户 shell 入口。 */
+function getToolDisplay(state: HostState, tool: ToolId): ToolDisplay {
+  const checked = state[tool] ?? "";
+  if (checked) {
+    return {
+      current: checked,
+      installed: true,
+      candidate: state.probe?.candidates.find((c) => c.tool === tool && c.activeInShell),
+      context: "shell",
+      path: state.probe?.contexts.shell?.[tool]
+    };
+  }
+
+  const probe = state.probe;
+  if (!probe) return { current: "", installed: false };
+
+  const norm = (value: string) => value.replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+  const withoutExt = (value: string) => value.replace(/\.(ps1|cmd|exe|js)$/, "");
+  for (const context of ["shell", "interactive", "login"] as const) {
+    const resolved = probe.contexts?.[context]?.[tool]?.trim();
+    if (!resolved) continue;
+    const nr = norm(resolved);
+    const nrNoExt = withoutExt(nr);
+    const candidate = probe.candidates.find((c) => {
+      if (c.tool !== tool) return false;
+      const path = norm(c.path);
+      return path === nr || withoutExt(path) === nrNoExt || norm(c.realPath) === nr;
+    });
+    return { current: candidate?.version ?? "", installed: true, candidate, context, path: resolved };
+  }
+  return { current: "", installed: false };
+}
+
 /** 主题：light / dark / system，持久化到 localStorage，作用于 <html data-theme> */
 function useTheme(): [ThemeMode, (m: ThemeMode) => void] {
   const [mode, setMode] = useState<ThemeMode>(() => {
@@ -162,10 +205,10 @@ export default function App() {
   const updatable = useCallback(
     (h: Host, tool: ToolId): boolean => {
       if (!h.enabled || !data) return false;
-      const cur = tool === "codex" ? (data.state[h.id]?.codex ?? "") : (data.state[h.id]?.claude ?? "");
+      const { current, installed } = getToolDisplay(data.state[h.id] ?? {}, tool);
       const target = data.effectiveTools?.[h.id]?.[tool]?.target ?? "";
-      if (!cur || !target) return false;
-      return cmpVer(cur, target) < 0;
+      if (!installed || !current || !target) return false;
+      return cmpVer(current, target) < 0;
     },
     [data]
   );
@@ -444,7 +487,7 @@ function HostRow(props: {
         </div>
       </td>
       <ToolCell
-        current={state.codex}
+        display={getToolDisplay(state, "codex")}
         effective={props.etools?.codex}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("codex")}
@@ -463,7 +506,7 @@ function HostRow(props: {
         }
       />
       <ToolCell
-        current={state.claude}
+        display={getToolDisplay(state, "claude")}
         effective={props.etools?.claude}
         disabled={!host.enabled || busy}
         onUpdate={() => props.onUpdate("claude")}
@@ -485,20 +528,23 @@ function HostRow(props: {
 }
 
 function ToolCell(props: {
-  current?: string;
+  display: ToolDisplay;
   effective?: EffectiveTool;
   disabled: boolean;
   onUpdate: () => void;
   onInstall: () => void;
   extra?: React.ReactNode;
 }) {
-  const { current, effective } = props;
+  const { current, installed, context, path } = props.display;
+  const { effective } = props;
   const target = effective?.target ?? "";
   const method = effective?.method ?? "npm";
+  const sourceTitle = path ? `${CTX_LABELS[context ?? "shell"]}：${path}` : undefined;
   let badge: { text: string; cls: string };
   let canUpdate = false;
   let aboveChannel = false;
-  if (!current) badge = { text: "未安装", cls: "gray" };
+  if (!installed) badge = { text: "未安装", cls: "gray" };
+  else if (!current) badge = { text: "已安装 · 版本未知", cls: "green" };
   else if (!target) badge = { text: "渠道目标未知", cls: "gray" };
   else {
     const c = cmpVer(current, target);
@@ -514,13 +560,15 @@ function ToolCell(props: {
   return (
     <td className="tool-cell">
       <div className="ver-row">
-        <span className="ver-current">{current || "—"}</span>
+        <span className="ver-current" title={sourceTitle}>{current || (installed ? "版本未知" : "—")}</span>
         <span className="ver-latest">{canUpdate ? `→ ${target}` : ""}</span>
       </div>
       <div className="ver-actions">
         <span className={`badge ${badge.cls}`}>{badge.text}</span>
-        {!current ? (
+        {!installed ? (
           <button className="update-btn" disabled={props.disabled} onClick={props.onInstall}>安装</button>
+        ) : !current ? (
+          <button className="update-btn" disabled title="已探测到命令入口，但无法确认版本">更新</button>
         ) : canUpdate ? (
           <button
             className="update-btn"
@@ -842,11 +890,12 @@ function ProbeBadges(props: { state: HostState; tool: ToolId; onShow: () => void
   if (!probe) return null;
   const cands = probe.candidates.filter((c) => c.tool === props.tool);
   if (!cands.length) return null;
-  const active = cands.find((c) => c.activeInShell);
+  const display = getToolDisplay(props.state, props.tool);
+  const active = display.candidate;
   const m = METHOD_LABELS[active?.method ?? "unknown"];
   return (
     <>
-      {active && <span className={`badge ${m.cls}`} title={active.path}>{m.text}</span>}
+      {active && <span className={`badge ${m.cls}`} title={display.path ?? active.path}>{m.text}</span>}
       <button className="link" onClick={props.onShow} title="查看全部安装候选与 PATH 实况">候选×{cands.length}</button>
     </>
   );

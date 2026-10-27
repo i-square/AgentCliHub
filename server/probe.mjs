@@ -56,6 +56,11 @@ const BASH_PROBE = [
   "  esac",
   '  echo "${M}cand=${p}|${rp}|$(printf \'%s\' "$v" | tr \'|\' \'/\' | tr "\n" " ")"',
   "}",
+  // 各 shell 实际解析到的入口也必须成为候选，覆盖自定义 installDir
+  'probe_one "$(command -v codex 2>/dev/null || true)"',
+  'probe_one "$(command -v claude 2>/dev/null || true)"',
+  '"$lshell" -lc \'command -v codex 2>/dev/null; command -v claude 2>/dev/null\' </dev/null 2>/dev/null | while IFS= read -r c; do probe_one "$c"; done',
+  '"$lshell" -ic \'command -v codex 2>/dev/null; command -v claude 2>/dev/null\' </dev/null 2>/dev/null | while IFS= read -r c; do probe_one "$c"; done',
   // 已知路径候选
   'for c in "$HOME/.local/bin/codex" "$HOME/.local/bin/claude" /usr/local/bin/codex /usr/local/bin/claude /usr/bin/codex /usr/bin/claude /snap/bin/codex /snap/bin/claude \\',
   '  /opt/homebrew/bin/codex /opt/homebrew/bin/claude \\',
@@ -155,6 +160,11 @@ function Probe($p){
     }
   }
   Write-Output ($M+'cand='+$p+'|'+$rp+'|'+($v -replace '\|','/' -replace [char]10,' '))
+}
+# 当前 PATH 的实际入口也要纳入候选，覆盖自定义安装目录
+foreach($n in 'codex','claude'){
+  $hit = Get-Command $n -ErrorAction SilentlyContinue
+  if($hit -and $hit.Source){ Probe $hit.Source }
 }
 $sr = Join-Path $HOME '.codex\packages'
 foreach($sub in 'standalone','app-server-daemon'){
