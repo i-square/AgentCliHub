@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig, loadState, saveState } from "./store.mjs";
-import { buildHostList, getHost } from "./hosts.mjs";
+import { buildHostList, buildEffectiveHostList, getHost } from "./hosts.mjs";
 import { TOOLS, checkHost, updateTool, restartAppServer, pushCatalog, catalogReadiness, applyCcPickerToHost } from "./tools.mjs";
 import {
   OAI_NAME,
@@ -57,10 +57,10 @@ app.get("/api/events", (req, res) => {
 });
 
 // ---------- 主机与配置 ----------
-app.get("/api/hosts", (req, res) => {
+app.get("/api/hosts", async (req, res) => {
   const config = loadConfig();
   const state = loadState();
-  const hosts = buildHostList(config);
+  const hosts = await buildEffectiveHostList(config);
   const effectiveTools = {};
   for (const h of hosts) {
     effectiveTools[h.id] = {};
@@ -476,8 +476,8 @@ async function runProbe(host, onData) {
 app.post("/api/hosts/:id/probe", (req, res) => startTask(req, res, "probe", "深度探测", runProbe));
 
 // 全部探测：对所有已启用主机并行发起探测（只读，不加主机锁）
-app.post("/api/probe-all", (req, res) => {
-  const hosts = buildHostList(loadConfig()).filter((h) => h.enabled);
+app.post("/api/probe-all", async (req, res) => {
+  const hosts = (await buildEffectiveHostList(loadConfig())).filter((h) => h.enabled);
   const ids = [];
   for (const host of hosts) {
     const task = tasks.create({ hostId: host.id, action: "probe", label: `${host.name} · 深度探测` });
@@ -539,8 +539,8 @@ app.post("/api/hosts/:id/auto-update", (req, res) => {
 });
 
 // 全部主机：对所有已启用主机并行发起（同一主机内仍与其他写操作串行）
-app.post("/api/auto-update-all", (req, res) => {
-  const hosts = buildHostList(loadConfig()).filter((h) => h.enabled);
+app.post("/api/auto-update-all", async (req, res) => {
+  const hosts = (await buildEffectiveHostList(loadConfig())).filter((h) => h.enabled);
   const ids = [];
   for (const host of hosts) {
     const task = tasks.create({ hostId: host.id, action: "auto-update", label: `${host.name} · 应用官方自动更新设置` });
@@ -622,9 +622,15 @@ function startTask(req, res, action, label, run) {
   if (!host) return res.status(404).json({ error: `未知主机: ${req.params.id}` });
   const task = tasks.create({ hostId: host.id, action, label: `${host.name} · ${label}` });
   const onData = (chunk) => tasks.append(task.id, chunk);
+  const runUsable = async () => {
+    const effective = (await buildEffectiveHostList(loadConfig())).find((h) => h.id === host.id);
+    if (effective?.duplicateOfLocal) throw new Error(`${host.id} 与 local 同 IP 且 shell 环境相同，已自动禁用；请改用 local`);
+    if (effective?.blocked) throw new Error(`${host.id} 已被屏蔽，请先取消屏蔽`);
+    return run(host, onData);
+  };
   const exec = HOST_EXCLUSIVE.has(action)
-    ? () => tasks.withHostLock(host.id, () => onData("[queue] 该主机有其他写操作进行中，已排队等待…\n"), () => run(host, onData))
-    : () => run(host, onData);
+    ? () => tasks.withHostLock(host.id, () => onData("[queue] 该主机有其他写操作进行中，已排队等待…\n"), runUsable)
+    : runUsable;
   (async () => {
     try {
       const result = await exec();
@@ -711,9 +717,9 @@ app.post("/api/hosts/:id/catalog-push", (req, res) =>
   })
 );
 
-app.post("/api/check-all", (req, res) => {
+app.post("/api/check-all", async (req, res) => {
   const config = loadConfig();
-  const hosts = buildHostList(config).filter((h) => h.enabled);
+  const hosts = (await buildEffectiveHostList(config)).filter((h) => h.enabled);
   const ids = [];
   for (const host of hosts) {
     const task = tasks.create({ hostId: host.id, action: "check", label: `${host.name} · 检查状态` });

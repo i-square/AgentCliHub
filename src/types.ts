@@ -11,7 +11,13 @@ export interface Host {
   hostName: string;
   user: string;
   port: number | null;
+  /** 最终可操作性：用户屏蔽或与 local 重复时为 false */
   enabled: boolean;
+  /** 用户显式屏蔽；持久化在 hostOverrides.enabled=false */
+  blocked: boolean;
+  /** 与 local 同 IP 且 shell 环境相同，由后端自动禁用（非用户屏蔽） */
+  duplicateOfLocal: boolean;
+  shell: "" | "pwsh" | "powershell" | "bash";
   prelude: string;
   note: string;
   /** 主机级安装目录覆盖（空 = 用全局工具默认） */
@@ -87,7 +93,7 @@ export interface CatalogPrioritiesResponse {
 
 export interface Config {
   excludePatterns: string[];
-  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string; preferRelay?: boolean }>;
+  hostOverrides: Record<string, { enabled?: boolean; prelude?: string; note?: string; installDir?: string; preferRelay?: boolean; shell?: "pwsh" | "powershell" | "bash" }>;
   catalog: CatalogSettings;
   /** 版本号统取：固定检查间隔（分钟） */
   versions: { checkIntervalMinutes: number };

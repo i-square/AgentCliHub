@@ -125,6 +125,7 @@ input[type="checkbox"]:disabled { cursor: not-allowed; }
 }
 .tag { font-size: 11px; background: var(--tag-bg); color: var(--tag-text); border-radius: 4px; padding: 1px 6px; }
 .tag.off { background: var(--tag-off-bg); color: var(--tag-off-text); }
+.host-table tr.blocked .host-name { text-decoration: line-through; }
 
 /* 版本区固定两行高度：版本行 + 操作行；版本号等宽字体 + 固定占位宽度 */
 .ver-row { display: flex; align-items: baseline; gap: 8px; height: 24px; }

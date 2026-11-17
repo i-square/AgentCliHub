@@ -358,6 +358,10 @@ export default function App() {
               onUpdate={(tool) => runAction(() => api.updateTool(h.id, tool))}
               onRestart={() => runAction(() => api.restartAppServer(h.id))}
               onEdit={() => setEditingHost(h)}
+              onToggleBlocked={() => runAction(async () => {
+                await api.saveHostOverride(h.id, { enabled: h.blocked });
+                await refreshHosts();
+              })}
               onProbe={() => runAction(() => api.probeHost(h.id))}
               onInstall={(tool) => setInstallTarget({ host: h, tool })}
               onShowProbe={() => setProbeHostId(h.id)}
@@ -457,6 +461,7 @@ function HostRow(props: {
   onUpdate: (tool: ToolId) => void;
   onRestart: () => void;
   onEdit: () => void;
+  onToggleBlocked: () => void;
   onProbe: () => void;
   onShowProbe: () => void;
   onInstall: (tool: ToolId) => void;
@@ -464,7 +469,7 @@ function HostRow(props: {
   const { host, state, tasks } = props;
   const busy = tasks.length > 0;
   return (
-    <tr className={host.enabled ? "" : "disabled"}>
+    <tr className={host.enabled ? "" : host.blocked ? "disabled blocked" : "disabled"}>
       <td>
         <input
           type="checkbox"
@@ -478,7 +483,8 @@ function HostRow(props: {
         <div className="host-name">
           {host.name}
           {host.kind === "local" && <span className="tag">本机</span>}
-          {!host.enabled && <span className="tag off">已停用</span>}
+          {host.duplicateOfLocal && <span className="tag off" title="与 local 同 IP 且 shell 环境相同；请使用 local">同机禁用</span>}
+          {host.blocked && <span className="tag off">已屏蔽</span>}
         </div>
         <div className="host-meta">
           {host.kind === "ssh" ? `${host.user}@${host.hostName}${host.port ? `:${host.port}` : ""}` : "pwsh"}
@@ -517,7 +523,8 @@ function HostRow(props: {
         <div className="action-row">
           <button disabled={!host.enabled || busy} onClick={props.onCheck}>检查</button>
           <button disabled={!host.enabled || busy} onClick={props.onProbe} title="只读枚举全部安装实例、PATH 视图与自动更新现状">探测</button>
-          <button className="ghost" onClick={props.onEdit}>编辑</button>
+          <button className="ghost" disabled={busy} onClick={props.onEdit}>编辑</button>
+          <button className="ghost" disabled={busy} onClick={props.onToggleBlocked}>{host.blocked ? "取消屏蔽" : "屏蔽"}</button>
         </div>
         <div className="hint-row">
           {busy && <span className="running-hint">{tasks[0].label}…</span>}
@@ -806,7 +813,7 @@ function SettingsModal(props: {
 }
 
 function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => void }) {
-  const [enabled, setEnabled] = useState(props.host.enabled);
+  const [blocked, setBlocked] = useState(props.host.blocked);
   const [prelude, setPrelude] = useState(props.host.prelude);
   const [note, setNote] = useState(props.host.note);
   const [installDir, setInstallDir] = useState(props.host.installDir ?? "");
@@ -816,7 +823,7 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
   const save = async () => {
     setSaving(true);
     try {
-      await api.saveHostOverride(props.host.id, { enabled, prelude, note, installDir, preferRelay });
+      await api.saveHostOverride(props.host.id, { enabled: !blocked, prelude, note, installDir, preferRelay });
       props.onSaved();
     } catch (e) {
       alert((e as Error).message);
@@ -828,9 +835,12 @@ function HostEditModal(props: { host: Host; onClose: () => void; onSaved: () => 
   return (
     <Modal title={`编辑主机：${props.host.name}`} onClose={props.onClose}>
       <label className="field inline">
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-        <span>纳入管理</span>
+        <input type="checkbox" checked={blocked} onChange={(e) => setBlocked(e.target.checked)} />
+        <span>屏蔽此主机（仍然列出，但不参与全选、一键更新及其他批量操作）</span>
       </label>
+      {props.host.duplicateOfLocal && (
+        <p className="muted">此主机与 local 同 IP 且 shell 环境相同，已由系统自动禁用；取消屏蔽后仍请使用 local。</p>
+      )}
       {props.host.kind === "ssh" && (
         <label className="field">
           <span>Shell prelude（远程命令前执行；留空则仅使用 nvm 自动探测）</span>
