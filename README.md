@@ -1,66 +1,63 @@
 # AgentCliHub
 
-> 从 Tauri 桌面控制台重构而来的纯 Web 小工具：统一管理多台机器上的 **Codex CLI** 与 **Claude Code**，默认使用官方独立二进制安装与更新，并保留 **npm** 兜底。
+> 从 Tauri 桌面控制台重构而来的纯 Web 工具：统一管理多台机器上的 **Codex CLI** 与 **Claude Code**，默认使用官方独立二进制安装与更新，并保留 **npm** 兜底。
 
-## 功能
+## 核心功能
 
-### 独立二进制管理（standalone 默认，npm 兜底）
+### 主机与执行环境
 
-- **深度探测**（只读）：枚举各主机 codex / claude 的全部安装实例——逐条 PATH、登录/交互双 shell 上下文、nvm/fnm/mise 等已知路径、官方包根（含 daemon 进程反推自定义 CODEX_HOME）；`--version` 失效时按 package.json 兜底取版本；桌面版私带 CLI 标记豁免
-- **版本缓存**：仅 hub 本机查外网（codex：GitHub atom → api.github → releases.openai.com 降级链；claude：GCS stable/latest 双通道），默认 6 小时间隔（可配），启动时按上次检查时间决定；代理模板（socks5h 含认证内嵌）/ GitHub 镜像 / token 可配
-- **安装/切换**：官方同构布局（releases/<ver>-<target> + current 链接 + installDir 入口），sha256 校验（codex 走 SHA256SUMS 链），远程可直连则直连、否则 hub 下载后经 SSH 中转推送；installDir 必填可自定义（默认 ~/.local/bin，主机级覆盖），安装前 PATH 预检（逐上下文位置 + 遮蔽者清单 + 共享挂载警告）
-- **自动更新接管**：安装独立二进制时按设置写入目标机配置——codex 的 `check_for_update_on_startup` / `[features] daemon_auto_start` / daemon `updater.autoUpdateEnabled`，claude 的 `autoUpdatesChannel` / `env.DISABLE_AUTOUPDATER` / 固定版本时的 `minimumVersion`；默认全部禁用（含 codex 启动更新提示），统一由 hub 更新
-- **清理**：保留 current + 最新 2 个版本，跳过运行中进程占用（Linux 读取 `/proc`，Windows 读取进程路径）
-- **PATH 修复**（可选，显式触发）：Bash 环境写入「去重置顶」幂等块（`.profile` + 用户 shell rc，兼容 Bash/zsh）；Windows 环境写注册表用户 PATH，修改前在目标机备份，并在 hub 的 `data/path-backups/` 留存副本
-- **npm 兜底**：策略切到 npm 时沿用原有更新链路（rename 失败清理重试）
+- 自动发现本机与 `~/.ssh/config` 中的 SSH 主机，支持排除模式、Shell prelude 和主机级配置覆盖。
+- 分别解析连接方式（local/SSH）、目标平台与执行器（PowerShell/Bash），避免把 Windows OpenSSH 错误切入 WSL。
+- 用户屏蔽、同机自动禁用和技术能力互不混用；被屏蔽或同机禁用的主机不会进入批量操作。
+- 只读状态检查与深度探测：版本、PATH 解析、安装候选、官方包根和自动更新配置。
 
-### 原有功能
+### 安装、更新与维护
 
+- **独立二进制默认**：支持 Windows/Linux 本机及 SSH 主机，官方目录布局、SHA-256 校验、安装后版本验证。
+- **下载与中转**：目标机可直连时直接下载，否则由 hub 下载校验后经 SSH 流式中转。
+- **渠道与版本**：支持 stable/latest/预发布或固定版本；版本缓存默认每 6 小时检查，可配置代理、镜像与 GitHub Token。
+- **npm 兜底**：按主机或工具切换为 npm 安装与更新，支持 npm rename 失败后的受限清理重试。
+- **维护操作**：PATH 预检与显式修复、旧版本清理、官方自动更新接管、Codex app-server 重启。
+- **批量任务**：批量检查、探测、安装与更新；同主机写操作串行，任务日志通过 SSE 实时显示。
 
-- **主机清单自动发现**：本机（Windows / pwsh，Linux / Bash）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）；与 local 同 IP 且 shell 环境相同的 SSH 条目自动标记「同机禁用」，仅 local 可操作
-- **屏蔽与同机禁用分离**：屏蔽状态持久化在 `data/config.json`，主机仍然列出但不进入全选、一键更新、全部检查/探测等批量操作；同机禁用是自动计算结果，不改变用户的屏蔽配置
-- **操作能力独立判断**：按目标运行时决定支持范围，`local` / `ssh` 使用相同规则；探测失败作为执行错误，不写入屏蔽状态。主机列表展示已知能力，未探测的 SSH 主机在任务入口解析环境
-- **状态检查**：各主机 codex / claude 当前版本 + npm registry 最新版本，一眼看出哪台该更新
-- **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
-  - 遇到 `rename ... failed`（EPERM/ENOENT）时，自动删除报错涉及的 npm 全局目录并重试一次（仅限 `npm root -g` 之内的路径，防止误删）
-  - 若因 app-server 占用文件导致失败，日志中会提示先重启 app-server
-- **重启 app-server**：结束后端 `codex app-server` 进程；Codex desktop 重连时会自动拉起新版本，更新从而生效。按钮位于 Codex 列（与 Claude Code 无关），支持批量重启
-- **批量更新**：勾选多台主机批量更新，或一键更新全部有新版的主机（自动跳过已最新/未安装）；同一时刻只允许一种工具批量执行（npm 全局目录互斥）
-- **主题切换**：浅色（淡黄科技感）/ 深色 / 跟随系统，localStorage 持久化
-- **稳定布局**：表格列宽固定、版本号等宽字体占位，状态变化不引起按钮位移
-- **实时日志**：任务输出通过 SSE 推送到页面
-- **每主机 prelude**：远程命令前执行的 shell 片段（如 nvm 加载、代理开启），可在页面“编辑”中覆盖
-- **模型目录（models.json）管理**：集中维护各来源的模型 catalog（`data/catalogs/models.*.json`），合并后一键推送到多台主机
-  - `models.oai.json` 为内置官方 catalog，从 GitHub 源地址在线下载（可在目录页改源地址），合并时强制 `use_responses_lite=false`（可关）
-  - 自定义 catalog（如 kimi / glm / deepseek）在页面用 CodeMirror JSON 编辑器在线编辑、校验、格式化，保存时规范化（按 slug 排序）并留 `.bak` 备份
-  - 各文件按 priority 分段管理（如 oai 0-100、glm 100-200），「重排」可按起点顺次重写编号
-  - 合并预览：模型总数、hash、较上次推送的新增/删除/变化、slug 冲突清单（冲突时 OAI 胜出，与 `update_models_catalog.py` 语义一致）
-  - 推送前自动检测目标机 `config.toml` 的 `model_catalog_json`：未开启或路径不一致的主机禁用推送并悬停提示原因（不强制改写配置）
-  - 推送 = 原子写入目标路径（默认 `~/.codex/models.json`）+ `\rm -f` 删除 `models_cache.json`，可选推送后重启 app-server；支持勾选多台批量推送
+### 模型目录
 
-## 使用
+- 集中维护 `data/catalogs/models.*.json`，支持官方 OAI 与自定义厂商 catalog。
+- 提供 JSON 编辑、校验、优先级分段、重排、合并预览和变更对比。
+- 推送前检查目标机 `model_catalog_json` 配置；推送采用原子写入并清理 `models_cache.json`。
+
+### 界面
+
+- 浅色、深色、跟随系统主题。
+- 固定表格布局、实时任务状态和日志、模型目录按需加载。
+
+## 快速开始
 
 推荐使用 Node.js 22.19.0；NVM 用户可先执行 `nvm use`。
 
 ```bash
 npm ci
 
-# 开发（API :8722 + Vite :5173 热更新）
+# 开发：API :8722 + Vite :5173 热更新
 npm run dev
 
-# 生产（构建前端后由后端直接托管）
+# 生产：构建前端后由后端直接托管
 npm run build
 npm start
 ```
 
-打开 http://127.0.0.1:8722 （开发时 http://127.0.0.1:5173）。
+开发页面为 <http://127.0.0.1:5173>，直接运行生产服务默认打开 <http://127.0.0.1:8722>。
+
+`npm start` 默认仅监听 `127.0.0.1:8722`。需要局域网访问或常驻运行时，请按部署文档配置监听地址和进程服务，不要依赖 Codex 等自动化工具的会话维持生产进程。
 
 ## 部署（常驻 + 开机自启）
 
-- [Windows（PM2 + pm2-windows-startup）](docs/deploy-windows.md)
-- [Linux（systemd / PM2 / nohup，Docker 预留）](docs/deploy-linux.md)
+- [Linux：systemd 用户服务 / 系统服务 / PM2 / nohup](docs/deploy-linux.md)
+- [Windows：PM2 + pm2-windows-startup](docs/deploy-windows.md)
 
-PM2 配置见根目录 `ecosystem.config.cjs`，生产部署监听 `0.0.0.0:8123`。
+Linux 单机部署推荐使用 **systemd 用户服务**，Windows 沿用 PM2。仓库中的 `ecosystem.config.cjs` 是通用 PM2 配置；本机 systemd 实例文件包含具体路径，不纳入版本控制。
+
+PM2 与文档中的 systemd 示例均监听 `0.0.0.0:8123`，仅在受信内网使用。
 
 ## 工作原理
 
@@ -68,16 +65,16 @@ PM2 配置见根目录 `ecosystem.config.cjs`，生产部署监听 `0.0.0.0:8123
 
 | 环节 | Windows（本机 / SSH） | Linux（本机 / SSH） |
 | --- | --- | --- |
-| 执行器 | 本机 `pwsh`；SSH 按探测/覆盖使用 `pwsh` 或 `powershell`，脚本采用 `-EncodedCommand` | `bash -c`；SSH 编码脚本放入命令参数，stdin 留给文件内容 |
+| 执行器 | 本机 `pwsh`；SSH 按探测或覆盖使用 `pwsh` / `powershell`，脚本采用 `-EncodedCommand` | `bash -c`；SSH 编码脚本放入命令参数，stdin 留给文件内容 |
 | node/npm 定位 | 系统 PATH；SSH 补齐目标机机器/用户 PATH | 自动 prepend `~/.nvm/versions/node/*/bin`，并使用主机 prelude |
 | 文件传输 | 本机文件流；SSH PowerShell 原始 stdin 流 | 本机文件流；SSH Bash 原始 stdin 流 |
-| 安装 / 清理 | Windows 实现 | Linux 实现 |
+| 独立安装 / 清理 | Windows 实现 | Linux 实现 |
 
 macOS 支持检查、探测、npm 更新、配置写入、重启和 PATH 修复；当前独立安装与清理依赖 GNU/Linux 工具，能力入口会拒绝这两项操作。技术支持范围不改变 `enabled`、`blocked` 或 `duplicateOfLocal`。
 
 ### 非标准环境与代理
 
-若某主机 nvm 不在默认 HOME、或 npm 需要代理，可在页面「编辑」中为该主机配置 Shell prelude（远程命令前执行），例如：
+若某主机 NVM 不在默认 HOME，或 npm 需要代理，可在页面“编辑”中配置 Shell prelude，例如：
 
 ```bash
 export NVM_DIR=/path/to/your/nvm
@@ -87,33 +84,36 @@ source <(curl -sSL https://example.com/setup_proxy.sh) >/dev/null 2>&1 || true
 
 ## 目录结构
 
-```
-server/       Express 后端（无构建步骤）
-  index.mjs     API / SSE / 静态托管
-  hosts.mjs     主机清单（ssh config 解析 + 覆盖）
-  tools.mjs     检查 / 更新 / 重启 / catalog 推送的领域逻辑与脚本构建
-  catalogs.mjs  模型 catalog 存储、校验、合并、OAI 下载、优先级重排
-  exec.mjs      进程与 SSH 传输（标准流、超时、取消）
-  hostShell.mjs 运行时解析与 Bash / PowerShell 执行
-  hostFiles.mjs 目标路径、读取、备份、原子写入与文件流传输
+```text
+server/
+  index.mjs       API / SSE / 静态托管
+  hosts.mjs       主机清单、屏蔽与同机禁用
+  tools.mjs       检查 / 更新 / 重启 / catalog 推送
+  install.mjs     独立安装、版本与资产解析、自动更新配置
+  maintenance.mjs 清理与 PATH 修复
+  catalogs.mjs    模型 catalog 存储、校验、合并与优先级管理
+  exec.mjs        进程与 SSH 传输（标准流、超时、取消）
+  hostShell.mjs   运行时解析与 Bash / PowerShell 执行
+  hostFiles.mjs   目标路径、读取、备份、原子写入与文件流传输
   capabilities.mjs 操作能力表与统一入口校验
-  store.mjs     data/config.json 与 state.json 持久化
-  tasks.mjs     任务与实时日志
-src/          React 前端（主机管理 / 模型目录 两页，目录页按需加载 CodeMirror）
-data/         运行时配置与状态快照（不入库）
-  catalogs/     models.*.json 模型目录文件（不入库）
+  store.mjs       data/config.json 与 state.json 持久化
+  tasks.mjs       任务与实时日志
+src/              React 前端（主机管理 / 模型目录）
+data/             运行时配置、状态与模型目录（不入库）
 ```
 
 ## 安全
 
-- `npm start` 默认只绑定 `127.0.0.1`；PM2 生产部署（`ecosystem.config.cjs`）绑定 `0.0.0.0:8123`。本工具能以你的身份在各主机执行命令，仅在受信内网使用，**切勿暴露公网**（详见部署文档）。
-- SSH 全部走 `~/.ssh/config` 的既有配置与免密登录（`BatchMode=yes`），不存储任何密码。连接后自动识别 Windows PowerShell / Bash，避免 Windows OpenSSH 被错误切入 WSL；可用 `hostOverrides.<id>.shell` 显式覆盖为 `pwsh`、`powershell` 或 `bash`。远程 Windows 调用会合并注册表机器/用户 PATH 与 SSH 当前 PATH（仅当次子进程生效）。
+- 本工具能以部署用户身份在本机及 SSH 主机执行命令，不提供身份认证。**仅在受信内网使用，切勿暴露公网。**
+- `npm start` 默认只绑定 `127.0.0.1`；PM2 与文档中的 systemd 示例绑定 `0.0.0.0:8123`，应同时限制网络访问范围。
+- SSH 使用 `~/.ssh/config` 的既有配置与免密登录（`BatchMode=yes`），不存储密码。可显式覆盖 shell 为 `pwsh`、`powershell` 或 `bash`。
+- 远程 Windows 调用会合并注册表机器/用户 PATH 与 SSH 当前 PATH，仅影响当次子进程。
 
-## 开发
+## 开发与测试
 
 ```bash
 npm run typecheck                  # 前端 TS 检查
-node --test server/*.test.mjs       # 后端单元测试
+node --test server/*.test.mjs       # 后端测试
 npx playwright install chromium    # 仅 macOS 首次运行前安装；Windows/Linux 使用系统浏览器
 npm run smoke:ui                   # 仪表盘 UI 冒烟（需先启动服务）
 node scripts/ui-smoke-catalogs.mjs # 模型目录页 UI 冒烟（需先启动服务）

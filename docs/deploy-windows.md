@@ -67,7 +67,7 @@ hub 的远程 PowerShell 执行层会在每次调用前合并「机器 PATH + �
 
 ## 后台启动的坑：Job Object（重要）
 
-Windows 的 Job Object 在宿主进程退出时会**连带终止组内所有进程**。从带 Job 的宿主里直接启动 PM2（Codex/自动化代理会话、部分 IDE 集成终端、CI runner 等），daemon 与业务进程会随宿主退出被系统一并清理：表现为"退出宿主后 8123 打不开"（本机曾两次踩中，根因即会话内 `pm2 start / resurrect` 从零拉起 daemon）。普通用户终端启动、以及登录自启（pm2-windows-startup 由 explorer 拉起）不受影响。
+Windows 的 Job Object 在宿主进程退出时会**连带终止组内所有进程**。从带 Job 的宿主里直接启动 PM2（Codex/自动化代理会话、部分 IDE 集成终端、CI runner 等），daemon 与业务进程可能随宿主退出被一并清理，表现为“退出宿主后 8123 打不开”。因此不要把自动化会话中的 `pm2 start / resurrect` 作为常驻安装方式；应优先使用普通用户终端和登录自启，或下述脱离进程树的启动方式。
 
 从这类宿主里从零拉起 PM2 的正确方式：先把模板 `scripts/start-pm2-detached.cmd.template` 复制为同目录下的 `scripts/start-pm2-detached.cmd`（本机版已被 gitignore，可按本机情况调整路径），再经 WMI 启动（进程由系统服务创建，脱离调用者进程树与 Job）：
 
@@ -78,9 +78,8 @@ $si = ([wmiclass]"Win32_ProcessStartup").CreateInstance(); $si.ShowWindow = 0
 
 脚本内容为 `pm2 resurrect`（PM2_HOME 在脚本内设置）。注意：**直接双击或普通终端运行该脚本不会脱离**，必须经 WMI（或计划任务/Windows 服务等系统级渠道）调用。
 
-已验证结论（2026-10-15 实测）：
+验证要点：
 
-- daemon 独立运行后，日常 `pm2 restart AgentCliHub-web`（包括在自动化会话里执行）是安全的：重启由常驻 daemon 执行，不受会话退出影响。
-- 业务进程与 daemon 相互独立：实测 `taskkill` 掉 daemon 后 8123 仍正常响应（HTTP 200），只需重新 `resurrect` 恢复 pm2 管理。
-- 已知无害怪象：daemon 进程本身可能带某个 Job 标记（`IsProcessInJob` 返回 True，来源未明）；业务进程不受影响，不必处理。
-- 快速自检：`taskkill /f /pid <daemon pid>` 后访问 8123，仍返回 200 即"服务已与宿主解耦"。
+- daemon 独立运行后，日常 `pm2 restart AgentCliHub-web` 由常驻 daemon 执行，不受调用会话退出影响。
+- 业务进程与 daemon 相互独立；daemon 异常退出后业务进程可能仍运行，重新 `resurrect` 即可恢复 PM2 管理。
+- 可在维护窗口停止 daemon 后访问 8123，确认业务进程仍能响应，以验证服务已与宿主解耦。
