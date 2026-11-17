@@ -1,6 +1,6 @@
 # AgentCliHub
 
-> 从 Tauri 桌面控制台重构而来的纯 Web 小工具：统一管理多台机器上的 **Codex CLI** 与 **Claude Code**，全部走 **npm** 安装与更新。
+> 从 Tauri 桌面控制台重构而来的纯 Web 小工具：统一管理多台机器上的 **Codex CLI** 与 **Claude Code**，默认使用官方独立二进制安装与更新，并保留 **npm** 兜底。
 
 ## 功能
 
