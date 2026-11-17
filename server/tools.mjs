@@ -174,7 +174,6 @@ Write-Output '__STATUS_END__'
 }
 
 export async function checkHost(host, onData, catalogTarget = DEFAULT_CATALOG_TARGET) {
-  if (host.kind === "local") assertWindowsLocal("状态检查");
   const shell = await detectHostShell(host);
   const result = shell.family === "windows"
     ? await runHostPwsh(host, windowsStatusScript(catalogTarget), { onData, timeoutMs: 120_000 })

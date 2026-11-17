@@ -487,7 +487,7 @@ function HostRow(props: {
           {host.blocked && <span className="tag off">已屏蔽</span>}
         </div>
         <div className="host-meta">
-          {host.kind === "ssh" ? `${host.user}@${host.hostName}${host.port ? `:${host.port}` : ""}` : "pwsh"}
+          {host.kind === "ssh" ? `${host.user}@${host.hostName}${host.port ? `:${host.port}` : ""}` : host.shell}
           {state.node ? ` · node ${state.node}` : ""}
           {state.checkedAt ? ` · 检查于 ${new Date(state.checkedAt).toLocaleString()}` : ""}
         </div>

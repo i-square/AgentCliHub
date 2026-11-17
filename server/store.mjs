@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isLocalStateCompatible } from "./platform.mjs";
 
 const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const configFile = path.join(dataDir, "config.json");
@@ -111,7 +112,12 @@ export function saveConfig(config) {
 
 /** state：每台主机最近一次检查到的版本信息快照，用于页面加载时直接展示 */
 export function loadState() {
-  return readJson(stateFile, { hosts: {} });
+  const state = readJson(stateFile, { hosts: {} });
+  if (isLocalStateCompatible(state.hosts?.local)) return state;
+  // 只在读取结果中隐藏不兼容快照；下一次状态保存会自然落盘，避免展示迁移前机器的数据。
+  const hosts = { ...state.hosts };
+  delete hosts.local;
+  return { ...state, hosts };
 }
 
 export function saveState(state) {

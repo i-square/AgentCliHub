@@ -1,4 +1,4 @@
-// 统一的命令执行层：本机走 pwsh，远程走 ssh + base64 传输脚本（规避多层引号转义问题）
+// 统一的命令执行层：本机走 pwsh/bash，远程走 ssh + 编码传输脚本（规避多层引号转义问题）
 import { spawn } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -51,6 +51,11 @@ function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) 
 export function runLocalPwsh(script, opts = {}) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return run("pwsh", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], opts);
+}
+
+/** 本机 Bash：脚本作为独立参数传递，stdin 仍可用于传输 payload。 */
+export function runLocalBash(script, opts = {}) {
+  return run("bash", ["-c", script], opts);
 }
 
 /** 远程 Linux：脚本 base64 后经 ssh 传输，由 bash 执行 */

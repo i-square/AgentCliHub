@@ -2,9 +2,12 @@
 // 只读：不写远程文件、不访问外网。远程 bash / 本机 pwsh 双实现，输出 __P__ 标记行，由本文件解析。
 import os from "node:os";
 import { detectHostShell, runHostPwsh, runHostBash } from "./hostShell.mjs";
-import { assertWindowsLocal, detectLocalPlatform, platformLabel } from "./platform.mjs";
+import { detectLocalPlatform, platformLabel } from "./platform.mjs";
 
 const PROBE_TIMEOUT_MS = 120_000;
+
+// 匹配可执行文件/官方路径，避免把 claude_code_hub 等仅名称包含关键字的进程算进来。
+export const RELATED_PROCESS_PATTERN = String.raw`(^|/)\.?(codex|claude)([ ./-]|$)|openai\.chatgpt`;
 
 // ---------- 远程 bash 探测脚本 ----------
 // 逐行拼接，避免 JS 模板插值吞掉 $；标记前缀 __P__
@@ -109,7 +112,7 @@ const BASH_PROBE = [
   'cs="$HOME/.claude/settings.json"',
   'if [ -f "$cs" ]; then echo "${M}claudeSettings=$(grep -E "autoUpdatesChannel|DISABLE_AUTOUPDATER|DISABLE_UPDATES|minimumVersion" "$cs" 2>/dev/null | tr -d "\\n " | head -c 300 || true)"; else echo "${M}claudeSettings=(absent)"; fi',
   // 运行中的相关进程（截断防爆量）
-  'echo "${M}procs=$(pgrep -af "codex|claude" 2>/dev/null | grep -v pgrep | head -n 8 | cut -c1-160 | tr "\\n" ";" || true)"',
+  `echo "\${M}procs=$(pgrep -af '${RELATED_PROCESS_PATTERN}' 2>/dev/null | grep -v pgrep | head -n 8 | cut -c1-160 | tr "\\n" ";" || true)"`,
   // rc 文件 PATH / nvm 命中统计
   'for rc in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zshrc" "$HOME/.zprofile"; do',
   '  [ -f "$rc" ] || continue',
@@ -331,7 +334,6 @@ function parseProbeOutput(host, output) {
  * @returns {Promise<object>} 结构化探测结果
  */
 export async function probeHost(host, onData = () => {}) {
-  if (host.kind === "local") assertWindowsLocal("深度探测");
   const shell = await detectHostShell(host);
   const shellLabel = shell.family === "windows" ? "Windows PowerShell" : "Bash";
   onData(host.kind === "local" ? `[probe] 本机 ${platformLabel(detectLocalPlatform())} 探测…\n` : `[probe] SSH 远程探测 ${host.id}（${shellLabel}）…\n`);

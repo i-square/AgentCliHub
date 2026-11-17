@@ -1,6 +1,6 @@
 // 主机 shell 识别与对应执行器。
 // SSH 默认 shell 与最终命令环境必须一致，禁止在 Windows OpenSSH 中无条件进入 WSL bash。
-import { runLocalPwsh, runRemoteBash, runRemoteCmd, runRemotePwsh } from "./exec.mjs";
+import { runLocalBash, runLocalPwsh, runRemoteBash, runRemoteCmd, runRemotePwsh } from "./exec.mjs";
 import { assertWindowsLocal, detectLocalPlatform } from "./platform.mjs";
 
 const WINDOWS_MARKER = "__ACH_WINDOWS_POWERSHELL__";
@@ -105,10 +105,9 @@ export async function runHostPwsh(host, script, opts = {}) {
 }
 
 export async function runHostBash(host, script, opts = {}) {
-  if (host.kind === "local") throw new Error("Linux 本机 Bash 链路尚未实现");
   const shell = await detectHostShell(host);
   if (shell.family !== "bash") throw new Error(`${host.id} 不是 Bash 环境`);
-  return runRemoteBash(host.id, script, opts);
+  return host.kind === "local" ? runLocalBash(script, opts) : runRemoteBash(host.id, script, opts);
 }
 
 /** 尚未远程 Windows 化的写操作在此统一阻断，避免退回 WSL 或把 Bash 发给 PowerShell。 */

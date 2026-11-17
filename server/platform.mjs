@@ -47,6 +47,21 @@ export function localHostName(platform = detectLocalPlatform()) {
   return `local (本机 ${platformLabel(platform)})`;
 }
 
+/** 旧快照没有平台字段时，用明确的 shell/路径特征识别跨 Windows 迁移。 */
+export function isLocalStateCompatible(snapshot, platform = detectLocalPlatform()) {
+  if (!snapshot) return true;
+  if (snapshot.platform) return snapshot.platform === platformLabel(platform);
+  const meta = snapshot.probe?.meta ?? {};
+  const shell = String(meta.shell ?? "").toLowerCase();
+  const uname = String(meta.uname ?? "");
+  const home = String(snapshot.home ?? meta.home ?? "");
+  const windows = ["pwsh", "powershell"].includes(shell) || /^windows/i.test(uname) || /^[a-z]:[\\/]/i.test(home);
+  if (windows) return platform.sysname === "windows";
+  const unix = shell === "bash" || /^(linux|darwin)/i.test(uname) || home.startsWith("/");
+  if (unix) return platform.sysname !== "windows";
+  return true;
+}
+
 /** Codex 官方 codex-package 资产 target。 */
 export function codexTarget(sysname, machine) {
   const s = String(sysname).toLowerCase();

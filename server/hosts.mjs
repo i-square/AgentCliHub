@@ -2,7 +2,7 @@
 import os from "node:os";
 import { isIP } from "node:net";
 import { parseSshConfig, globToRegExp } from "./sshConfig.mjs";
-import { localHostName } from "./platform.mjs";
+import { detectLocalPlatform, localHostName } from "./platform.mjs";
 import { detectHostShell } from "./hostShell.mjs";
 
 export function buildHostList(config) {
@@ -18,8 +18,17 @@ export function buildHostList(config) {
       port: h.port ?? null
     }));
 
+  const localPlatform = detectLocalPlatform();
   const hosts = [
-    { id: "local", kind: "local", name: localHostName(), hostName: "", user: "", port: null },
+    {
+      id: "local",
+      kind: "local",
+      name: localHostName(localPlatform),
+      hostName: "",
+      user: "",
+      port: null,
+      shell: localPlatform.sysname === "windows" ? "pwsh" : "bash"
+    },
     ...sshHosts
   ];
 
@@ -36,7 +45,7 @@ export function buildHostList(config) {
       note: o.note ?? "",
       installDir: o.installDir ?? "",
       preferRelay: o.preferRelay ?? false,
-      shell: o.shell ?? ""
+      shell: h.kind === "local" ? h.shell : o.shell ?? ""
     };
   });
 }

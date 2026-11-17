@@ -35,6 +35,8 @@ export interface HostState {
   latestClaude?: string;
   checkedAt?: string;
   home?: string;
+  /** local 快照所属平台；用于迁移后识别并隐藏不兼容的旧快照 */
+  platform?: string;
   catalogJson?: string;
   catalogHash?: string;
   catalogPushedAt?: string;

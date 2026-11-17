@@ -27,6 +27,7 @@ import { VENDOR_KEYS, maskKeys, saveCatalogKeys, pullVendorCatalog } from "./cat
 import { TaskManager } from "./tasks.mjs";
 import { refreshVersions, startVersionScheduler, versionsConfig } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
+import { detectLocalPlatform, platformLabel } from "./platform.mjs";
 import { installTool, preflight, resolveToolConfig, resolveVersionSpec, isValidVersionSpec, applyAutoUpdate } from "./install.mjs";
 import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
 
@@ -35,6 +36,14 @@ const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工�
 
 const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tasks = new TaskManager();
+
+function saveHostState(host, patch) {
+  const state = loadState();
+  const platform = host.kind === "local" ? platformLabel(detectLocalPlatform()) : undefined;
+  state.hosts[host.id] = { ...state.hosts[host.id], ...patch, ...(platform ? { platform } : {}) };
+  saveState(state);
+}
+
 const app = express();
 app.use(express.json({ limit: "10mb" })); // catalog 文件可能接近 1MB
 
@@ -465,9 +474,7 @@ app.post("/api/tool-versions/refresh", async (req, res) => {
 /** 深度探测一台主机并写入 state（单机探测与全部探测共用） */
 async function runProbe(host, onData) {
   const result = await probeHost(host, onData);
-  const state = loadState();
-  state.hosts[host.id] = { ...state.hosts[host.id], probe: result };
-  saveState(state);
+  saveHostState(host, { probe: result });
   const codexN = result.candidates.filter((c) => c.tool === "codex").length;
   const claudeN = result.candidates.filter((c) => c.tool === "claude").length;
   return `探测完成：codex 候选 ${codexN} 个，claude 候选 ${claudeN} 个`;
@@ -646,9 +653,7 @@ function startTask(req, res, action, label, run) {
 app.post("/api/hosts/:id/check", (req, res) =>
   startTask(req, res, "check", "检查状态", async (host, onData) => {
     const status = await checkHost(host, onData, loadConfig().catalog.targetPath);
-    const state = loadState();
-    state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
-    saveState(state);
+    saveHostState(host, { ...status, checkedAt: new Date().toISOString() });
     return `codex ${status.codex || "未安装"} / claude ${status.claude || "未安装"}`;
   })
 );
@@ -671,9 +676,7 @@ app.post("/api/hosts/:id/update", (req, res) => {
     }
     // 更新成功后立刻重新检查，刷新版本快照
     const status = await checkHost(host, () => {}, config.catalog.targetPath);
-    const state = loadState();
-    state.hosts[host.id] = { ...state.hosts[host.id], ...status, checkedAt: new Date().toISOString() };
-    saveState(state);
+    saveHostState(host, { ...status, checkedAt: new Date().toISOString() });
     return summary;
   });
 });

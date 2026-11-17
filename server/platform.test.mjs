@@ -6,7 +6,8 @@ import {
   localHostName,
   codexTarget,
   claudePlatform,
-  assertWindowsLocal
+  assertWindowsLocal,
+  isLocalStateCompatible
 } from "./platform.mjs";
 
 test("本机平台自动识别并规范化 x64/arm64", () => {
@@ -44,4 +45,17 @@ test("非 Windows 本机不会误入 Windows 专用链路", () => {
     () => assertWindowsLocal("状态检查", { sysname: "linux", machine: "arm64" }),
     /Linux\/arm64.*状态检查.*不会再误走 Windows/
   );
+});
+
+test("local 快照拒绝跨平台误用并校验平台标识", () => {
+  const linux = { sysname: "linux", machine: "x64", libc: "glibc" };
+  const windows = { sysname: "windows", machine: "x64", libc: "" };
+  const legacyWindows = { home: "C:\\Users\\yfu", probe: { meta: { shell: "pwsh", uname: "Windows 10" } } };
+  const legacyLinux = { home: "/home/yfu", probe: { meta: { shell: "bash", uname: "Linux host" } } };
+  assert.strictEqual(isLocalStateCompatible(legacyWindows, linux), false);
+  assert.strictEqual(isLocalStateCompatible(legacyWindows, windows), true);
+  assert.strictEqual(isLocalStateCompatible(legacyLinux, linux), true);
+  assert.strictEqual(isLocalStateCompatible(legacyLinux, windows), false);
+  assert.strictEqual(isLocalStateCompatible({ platform: "Linux/x64" }, linux), true);
+  assert.strictEqual(isLocalStateCompatible({ platform: "Windows/x64" }, linux), false);
 });

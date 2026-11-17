@@ -17,7 +17,7 @@
 ### 原有功能
 
 
-- **主机清单自动发现**：本机（Windows / pwsh）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）；与 local 同 IP 且 shell 环境相同的 SSH 条目自动标记「同机禁用」，仅 local 可操作
+- **主机清单自动发现**：本机（Windows / pwsh，Linux / Bash）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）；与 local 同 IP 且 shell 环境相同的 SSH 条目自动标记「同机禁用」，仅 local 可操作
 - **屏蔽与同机禁用分离**：屏蔽状态持久化在 `data/config.json`，主机仍然列出但不进入全选、一键更新、全部检查/探测等批量操作；同机禁用是自动计算结果，不改变用户的屏蔽配置
 - **状态检查**：各主机 codex / claude 当前版本 + npm registry 最新版本，一眼看出哪台该更新
 - **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
