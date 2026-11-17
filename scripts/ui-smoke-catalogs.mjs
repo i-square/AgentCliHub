@@ -1,7 +1,7 @@
 // 模型目录页 UI 冒烟：切到目录页，打开 kimi 文件，验证编辑器与推送表格
-import { chromium } from "playwright";
+import { launchSmokeBrowser } from "./browser.mjs";
 
-const browser = await chromium.launch({ channel: "msedge" });
+const browser = await launchSmokeBrowser();
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));

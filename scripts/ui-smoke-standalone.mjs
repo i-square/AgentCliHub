@@ -1,8 +1,8 @@
 // M1/M2 冒烟：版本缓存条、探测徽标、安装弹窗与 PATH 预检（需服务运行在 8899）
-import { chromium } from "playwright";
+import { launchSmokeBrowser } from "./browser.mjs";
 
 const base = process.env.SMOKE_BASE ?? "http://127.0.0.1:8899";
-const browser = await chromium.launch({ channel: "msedge" });
+const browser = await launchSmokeBrowser();
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));

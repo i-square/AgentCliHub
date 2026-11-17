@@ -39,8 +39,10 @@
 
 ## 使用
 
-```powershell
-npm install
+推荐使用 Node.js 22.19.0；NVM 用户可先执行 `nvm use`。
+
+```bash
+npm ci
 
 # 开发（API :8722 + Vite :5173 热更新）
 npm run dev
@@ -100,9 +102,12 @@ data/         运行时配置与状态快照（不入库）
 
 ## 开发
 
-```powershell
-npm run typecheck        # 前端 TS 检查
-node --check server/*.mjs # 后端语法检查
-node scripts/ui-smoke.mjs # UI 冒烟（需要本机 Edge，npx playwright install chromium）
-node scripts/ui-smoke-catalogs.mjs # 模型目录页 UI 冒烟
+```bash
+npm run typecheck                  # 前端 TS 检查
+node --test server/*.test.mjs       # 后端单元测试
+npx playwright install chromium    # 仅 macOS 首次运行前安装；Windows/Linux 使用系统浏览器
+npm run smoke:ui                   # 仪表盘 UI 冒烟（需先启动服务）
+node scripts/ui-smoke-catalogs.mjs # 模型目录页 UI 冒烟（需先启动服务）
 ```
+
+UI 冒烟在 Windows 使用系统 Edge、Linux 使用系统 Chrome；其他平台使用 Playwright Chromium。
