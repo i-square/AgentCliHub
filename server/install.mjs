@@ -7,46 +7,19 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { runLocalPwsh, runRemoteBash, runRemoteCmd } from "./exec.mjs";
 import { loadState, saveState } from "./store.mjs";
 import { updateTool, bashPrelude } from "./tools.mjs";
 import { curlText } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
-import { codexTarget, claudePlatform, detectLocalPlatform, assertWindowsLocal } from "./platform.mjs";
-import { assertHostBash } from "./hostShell.mjs";
+import { codexTarget, claudePlatform } from "./platform.mjs";
+import { detectHostShell, runHostBash, runHostPwsh } from "./hostShell.mjs";
+import { requireCapability } from "./capabilities.mjs";
+import { bashQuote as sq, pwshQuote as psq, bashPathExpr, windowsPathExpr, readText, writeTextAtomic, putFile, exists } from "./hostFiles.mjs";
 
 const GCS_BASE =
   "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
 const GH_DL = "https://github.com/openai/codex/releases/download";
 const DL_DIR = path.join(os.tmpdir(), "agentclihub-dl");
-
-/** ssh 命令行中的路径表达式：~ 前缀用 $HOME 展开，其余单引号字面量 */
-function remoteCmdPath(p) {
-  const t = (p ?? "").trim();
-  if (t === "~") return '"$HOME"';
-  if (t.startsWith("~/")) {
-    const rest = t.slice(2).replace(/["$`\\]/g, (m) => "\\" + m);
-    return '"$HOME/' + rest + '"';
-  }
-  return sq(t);
-}
-
-const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-
-/** 远程路径表达式：~ 前缀交给 $HOME，其余按字面量（与 tools.mjs 同款语义） */
-export function remotePathExpr(p) {
-  const t = (p ?? "").trim();
-  if (t === "~") return '"$HOME"';
-  if (t.startsWith("~/")) return `"$HOME/${t.slice(2).replace(/["$`\\]/g, "\\$&")}"`;
-  return sq(t);
-}
-
-export function expandHomeLocal(p) {
-  const t = (p ?? "").trim();
-  if (t === "~") return os.homedir();
-  if (t.startsWith("~/") || t.startsWith("~\\")) return path.join(os.homedir(), t.slice(2));
-  return t;
-}
 
 // ---------- 配置与版本解析 ----------
 
@@ -148,26 +121,9 @@ async function githubAssetDigest(version, assetName, { proxy = "", token = "" } 
 
 // ---------- 平台与资产 ----------
 
-async function remoteUname(host) {
-  const r = await runRemoteBash(
-    host.id,
-    'echo "$(uname -s) $(uname -m) $( (ldd --version 2>&1 || true) | grep -qi musl && echo musl || echo glibc)"',
-    { timeoutMs: 30_000 }
-  );
-  const line = r.output.trim().split(/\r?\n/).pop() ?? "";
-  const [sysname, machine, libc = "glibc"] = line.split(/\s+/);
-  if (!sysname || !machine) throw new Error(`无法识别远程平台: ${line}`);
-  if (/darwin/i.test(sysname)) {
-    throw new Error("暂不支持 macOS 主机的独立二进制安装（安装脚本依赖 GNU 工具 mv -T / sha256sum / readlink -f），请将该主机安装方式改为 npm");
-  }
-  return { sysname, machine, libc };
-}
-
 /** 组装 codex 资产信息：官方 package 资产 + SHA256SUMS 校验链（与官方安装器一致） */
-async function codexArtifact(host, version, config, onData) {
-  const { sysname, machine } = host.kind === "local"
-    ? detectLocalPlatform()
-    : await remoteUname(host);
+async function codexArtifact(runtime, version, config, onData) {
+  const { sysname, machine } = runtime.platform;
   const target = codexTarget(sysname, machine);
   onData(`平台: ${sysname}/${machine} → ${target}\n`);
   const assetName = `codex-package-${target}.tar.gz`;
@@ -201,10 +157,8 @@ async function codexArtifact(host, version, config, onData) {
 }
 
 /** 组装 claude 资产信息 { url, sha256, platformKey } */
-async function claudeArtifact(host, version, config, onData) {
-  const { sysname, machine, libc } = host.kind === "local"
-    ? detectLocalPlatform()
-    : await remoteUname(host);
+async function claudeArtifact(runtime, version, config, onData) {
+  const { sysname, machine, libc } = runtime.platform;
   const platformKey = claudePlatform(sysname, machine, libc);
   onData(`平台: ${sysname}/${machine}${libc ? `/${libc}` : ""} → ${platformKey}\n`);
   const manifest = JSON.parse(
@@ -213,85 +167,6 @@ async function claudeArtifact(host, version, config, onData) {
   const p = manifest.platforms?.[platformKey];
   if (!p) throw new Error(`manifest 中无平台 ${platformKey}`);
   return { url: `${GCS_BASE}/${version}/${platformKey}/${p.binary}`, sha256: p.checksum, platformKey, kind: "bin" };
-}
-
-// ---------- 远程文件读写（配置接管用） ----------
-
-const REMOTE_READ_MARKERS = Object.freeze({
-  sentinel: "__ACH_NOFILE_7f3d__",
-  begin: "__ACH_BEGIN_7f3d__",
-  end: "__ACH_END_7f3d__",
-  fail: "__ACH_READFAIL_7f3d__"
-});
-
-/**
- * 解析远程读取结果。结构化内容只取 stdout：ssh 自身诊断走 stderr，不能与远端文件内容交错合并。
- * 保留 output 作为旧调用方/测试的兼容输入，错误摘要仍使用合并输出。
- */
-export function parseRemoteReadResult(r) {
-  const { sentinel, begin, end, fail } = REMOTE_READ_MARKERS;
-  const protocolOutput = r.stdout ?? r.output;
-  const why = (reason) => ({ state: "error", reason: `${reason}；原始输出前 160 字符: ${JSON.stringify(r.output.slice(0, 160))}` });
-  if (r.code !== 0) return why(`ssh 退出码 ${r.code}`);
-  if (protocolOutput.includes(fail)) return why("cat 读取失败（权限？）");
-  if (protocolOutput.includes(sentinel)) return { state: "missing" };
-  const crlfTransport = protocolOutput.includes(`${begin}\r\n`);
-  const m = new RegExp(`${begin}\\r?\\n([\\s\\S]*?)\\r?\\n?${end}`).exec(protocolOutput);
-  if (!m) return why("找不到内容标记"); // 宁可不写
-  return { state: "ok", content: crlfTransport ? m[1].replace(/\r\n/g, "\n") : m[1] };
-}
-
-/**
- * 三态读取：ok(content) / missing(文件不存在，可新建) / error(读取失败或输出无法解析，不得写入；reason 说明原因)
- * 兼容 CRLF 传输：部分主机（如 Windows sshd 转发到 WSL）会把 \n 转成 \r\n，此时标记行以 \r\n 结尾，
- * 内容里每个 \n 也被加了 \r，需整体还原（原文件自带的 \r\n 传输后是 \r\r\n，还原一次即得到原样）。
- */
-async function remoteReadText(host, pathExpr) {
-  const { sentinel, begin, end, fail } = REMOTE_READ_MARKERS;
-  // 用 begin/end 标记包裹内容；解析时只读 stdout，隔离 ssh 横幅/hostkeys 等 stderr 诊断。
-  // cat 失败（如无权限）单独打失败标记，避免把报错文字当成文件内容。
-  const r = await runRemoteCmd(
-    host.id,
-    `if [ -f ${pathExpr} ]; then printf '%s\\n' '${begin}'; if cat -- ${pathExpr}; then printf '\\n%s\\n' '${end}'; else printf '\\n%s\\n' '${fail}'; fi; else printf '%s' '${sentinel}'; fi`,
-    { timeoutMs: 30_000 }
-  );
-  return parseRemoteReadResult(r);
-}
-
-/** 读取接管目标文件（本机/远程统一为三态） */
-async function readConfigFile(host, localPath, remoteExpr) {
-  if (host.kind !== "local") return remoteReadText(host, remoteExpr);
-  try {
-    return fs.existsSync(localPath) ? { state: "ok", content: fs.readFileSync(localPath, "utf8") } : { state: "missing" };
-  } catch {
-    return { state: "error" };
-  }
-}
-
-/** 写入接管目标文件（本机先备份；远程由 remoteWriteText 原子写入并备份） */
-async function writeConfigFile(host, localPath, remoteExpr, content, onData) {
-  if (host.kind === "local") {
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    if (fs.existsSync(localPath)) fs.copyFileSync(localPath, `${localPath}.agentclihub.bak`);
-    fs.writeFileSync(localPath, content, "utf8");
-  } else {
-    await remoteWriteText(host, remoteExpr, content, onData);
-  }
-}
-
-async function remoteWriteText(host, pathExpr, content, onData) {
-  const script = [
-    "set -e",
-    `t=${pathExpr}`,
-    `mkdir -p "$(dirname "$t")"`,
-    `[ -f "$t" ] && cp -p "$t" "$t.agentclihub.bak" || true`,
-    `tmp="$t.agentclihub-$$"`,
-    `base64 -d > "$tmp"`,
-    `mv -f "$tmp" "$t"`,
-    `echo "已写入 $t（备份 $t.agentclihub.bak）"`
-  ].join("\n");
-  const r = await runRemoteCmd(host.id, script, { input: Buffer.from(content, "utf8").toString("base64"), onData, timeoutMs: 60_000 });
-  if (r.code !== 0) throw new Error(`远程写入 ${pathExpr} 失败`);
 }
 
 /** 简单并发闸：最多 max 个同时执行，其余排队 */
@@ -352,48 +227,6 @@ async function ensureDownloaded(localFile, artifact, proxy, onData) {
   }
   await task;
   onData("sha256 校验通过\n");
-}
-
-/**
- * 大文件经 SSH stdin 中转推送（远程不可直连下载源时的兜底）。
- * 原始二进制流式写入（`cat > file`），由 pipe 处理背压：内存占用恒定在一个 chunk 量级，
- * 不再做 base64 编码（省掉 33% 流量和 1.33 倍大小的临时文件）。完整性由远程安装脚本的 sha256 校验保证。
- */
-function pushFileViaSsh(host, localFile, remotePath, onData) {
-  onData("远程直连失败，改由 hub 中转推送…\n");
-  return new Promise((resolve, reject) => {
-    const size = fs.statSync(localFile).size;
-    const target = remoteCmdPath(remotePath);
-    const child = spawn(
-      "ssh",
-      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", host.id, `mkdir -p "\$(dirname ${target})" && cat > ${target}`],
-      { windowsHide: true, stdio: ["pipe", "ignore", "pipe"] }
-    );
-    let err = "";
-    child.stderr.on("data", (c) => (err = (err + c).slice(-300)));
-    child.stdin.on("error", () => {}); // 远程提前退出的 EPIPE 由 close 退出码体现
-
-    const rs = fs.createReadStream(localFile, { highWaterMark: 1024 * 1024 });
-    let sent = 0;
-    let lastEmit = 0;
-    rs.on("data", (c) => {
-      sent += c.length;
-      const now = Date.now();
-      if (now - lastEmit > 3000) {
-        lastEmit = now;
-        onData(`中转推送中… ${Math.round((sent / size) * 100)}%\n`);
-      }
-    });
-    rs.on("error", (e) => {
-      child.kill();
-      reject(e);
-    });
-    rs.pipe(child.stdin);
-    child.on("error", reject);
-    child.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`ssh 推送失败(${code}): ${err.trim().slice(-200)}`))
-    );
-  });
 }
 
 // ---------- 自动更新接管（默认禁用官方自动更新） ----------
@@ -479,7 +312,6 @@ export function editClaudeSettings(text, { disableAutoUpdater, channel, minimumV
  * @returns {Promise<{changed: boolean, warned: boolean}>}
  */
 async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", channel = "" } = {}, onData = () => {}) {
-  await assertHostBash(host, "自动更新配置写入");
   const au = config.autoUpdate?.[tool] ?? {};
   let changed = false;
   let warned = false;
@@ -488,8 +320,8 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
     onData(`[warn] ${msg}\n`);
   };
   /** 读-改-写一个配置文件；读取失败（error）一律跳过并告警，绝不按空文件覆盖 */
-  const edit = async (label, localPath, remoteExpr, editFn) => {
-    const cur = await readConfigFile(host, localPath, remoteExpr);
+  const edit = async (label, targetPath, editFn) => {
+    const cur = await readText(host, targetPath);
     if (cur.state === "error") {
       warn(`读取 ${label} 失败，已跳过接管（未写入，避免覆盖原有配置）：${cur.reason ?? "本机读取异常"}`);
       return false;
@@ -506,7 +338,7 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
       onData(`${label} 已匹配设置，无需修改\n`);
       return false;
     }
-    await writeConfigFile(host, localPath, remoteExpr, next, onData);
+    await writeTextAtomic(host, targetPath, next, { onData });
     changed = true;
     return true;
   };
@@ -514,26 +346,17 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
   if (tool === "codex") {
     if (await edit(
       "config.toml",
-      expandHomeLocal("~/.codex/config.toml"),
-      remotePathExpr("~/.codex/config.toml"),
+      "~/.codex/config.toml",
       (old) => editCodexConfigToml(old, au, (m) => onData(`[warn] ${m}`))
     )) onData(`已接管 config.toml：check_for_update_on_startup=${au.startupCheck}，daemon_auto_start=${au.daemonAutoStart}\n`);
 
     // daemon 设置：文件存在，或 daemon 目录已存在（settings.json 缺省即官方默认开启）时才改写；无 daemon 的主机不新建
-    const localDs = expandHomeLocal("~/.codex/app-server-daemon/settings.json");
-    const dsExpr = remotePathExpr("~/.codex/app-server-daemon/settings.json");
-    const cur = await readConfigFile(host, localDs, dsExpr);
+    const daemonPath = "~/.codex/app-server-daemon/settings.json";
+    const cur = await readText(host, daemonPath);
     if (cur.state === "error") {
       warn(`读取 daemon settings.json 失败，已跳过接管（未写入）：${cur.reason ?? "本机读取异常"}`);
     } else {
-      let allow = cur.state === "ok";
-      if (!allow) {
-        if (host.kind === "local") allow = fs.existsSync(expandHomeLocal("~/.codex/app-server-daemon"));
-        else {
-          const r = await runRemoteBash(host.id, `[ -d ${remotePathExpr("~/.codex/app-server-daemon")} ] && echo yes || echo no`, { timeoutMs: 15_000 });
-          allow = r.output.trim().endsWith("yes");
-        }
-      }
+      const allow = cur.state === "ok" || await exists(host, "~/.codex/app-server-daemon", { directory: true });
       if (!allow) {
         onData("该主机没有 codex daemon，无需配置 daemon updater\n");
       } else {
@@ -546,7 +369,7 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
           next = old;
         }
         if (next !== old) {
-          await writeConfigFile(host, localDs, dsExpr, next, onData);
+          await writeTextAtomic(host, daemonPath, next, { onData });
           changed = true;
           onData(`已接管 daemon updater：autoUpdateEnabled=${au.daemonAutoUpdate}\n`);
         } else if (!warned) {
@@ -562,8 +385,7 @@ async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", chan
     };
     if (await edit(
       "claude settings.json",
-      expandHomeLocal("~/.claude/settings.json"),
-      remotePathExpr("~/.claude/settings.json"),
+      "~/.claude/settings.json",
       (old) => editClaudeSettings(old, claudeAu)
     )) {
       onData(`已接管 claude settings.json：DISABLE_AUTOUPDATER=${au.disableAutoUpdater ? "1" : "移除"}${pinnedVersion ? `，minimumVersion=${pinnedVersion}` : ""}\n`);
@@ -586,6 +408,7 @@ const pinnedOf = (spec) => (VERSION_RE.test(spec ?? "") ? spec : "");
  * @returns {Promise<string>} 一句话结果
  */
 export async function applyAutoUpdate(host, tool, config, onData = () => {}) {
+  await requireCapability(host, "autoUpdate");
   const toolCfg = resolveToolConfig(config, host, tool);
   onData(`[auto-update] ${tool}：应用官方自动更新设置\n`);
   const r = await takeoverAutoUpdate(host, tool, config, { pinnedVersion: pinnedOf(toolCfg.channel), channel: toolCfg.channel }, onData);
@@ -602,10 +425,15 @@ export function preflight(host, tool, installDir, state) {
   const probe = state.hosts?.[host.id]?.probe;
   if (!probe?.done) return { status: "need-probe", reason: "请先对该主机执行「探测」" };
   const home = probe.meta.home || "";
-  const dir = installDir.trim() === "~" ? home
-    : installDir.startsWith("~/") ? `${home}/${installDir.slice(2)}`
-    : installDir;
-  const norm = (s) => (s ?? "").replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  const windows = /^(pwsh|powershell)$/i.test(probe.meta.shell ?? "") || /^windows/i.test(probe.meta.uname ?? "");
+  const inputDir = installDir.trim();
+  const dir = inputDir === "~" ? home
+    : inputDir.startsWith("~/") || (windows && inputDir.startsWith("~\\")) ? `${home}/${inputDir.slice(2)}`
+    : inputDir;
+  const norm = (s) => {
+    const value = windows ? (s ?? "").replace(/\\/g, "/").toLowerCase() : (s ?? "");
+    return value.replace(/\/+$/, "");
+  };
   const aliases = new Set([norm(dir)]);
   if (probe.meta.localBinReal && norm(dir) === norm(`${home}/.local/bin`)) aliases.add(norm(probe.meta.localBinReal));
   const versionAt = (p) => probe.candidates.find((c) => norm(c.path) === norm(p))?.version ?? "";
@@ -625,12 +453,12 @@ export function preflight(host, tool, installDir, state) {
   for (const name of ["login", "interactive"]) {
     const ctx = probe.contexts?.[name];
     if (!ctx?.path) continue;
-    const dirs = ctx.path.split(":").filter(Boolean);
+    const dirs = ctx.path.split(windows ? ";" : ":").filter(Boolean);
     const idx = dirs.findIndex((d) => aliases.has(norm(d)));
     const resolved = ctx[tool] ?? "";
     const shadowedBy = [];
     if (idx > 0 && resolved) {
-      const rdir = resolved.slice(0, resolved.lastIndexOf("/"));
+      const rdir = (windows ? path.win32 : path.posix).dirname(resolved);
       if (!aliases.has(norm(rdir))) {
         const rIdx = dirs.findIndex((d) => norm(d) === norm(rdir));
         if (rIdx >= 0 && rIdx < idx) shadowedBy.push({ index: rIdx + 1, dir: rdir, version: versionAt(resolved), method: "" });
@@ -670,8 +498,10 @@ export function preflight(host, tool, installDir, state) {
  */
 async function isStandaloneInstalled(host, tool, version, installDir) {
   try {
-    if (host.kind === "local") return await isStandaloneInstalledLocalWindows(tool, version, installDir);
-    const dirExpr = remotePathExpr(installDir);
+    if ((await detectHostShell(host)).family === "windows") {
+      return await isStandaloneInstalledWindows(host, tool, version, installDir);
+    }
+    const dirExpr = bashPathExpr(installDir);
     const verOf = `head -n1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n1`;
     const script = tool === "codex"
       ? `VERSION=${sq(version)}
@@ -691,39 +521,41 @@ ENTRY=${dirExpr}/claude
 got=$("$ENTRY" --version 2>&1 | ${verOf})
 [ "$got" = "$VERSION" ] && echo __ALREADY__
 exit 0`;
-    const r = await runRemoteBash(host.id, script, { timeoutMs: 30_000 });
-    return r.output.includes("__ALREADY__");
+    const r = await runHostBash(host, script, { timeoutMs: 30_000 });
+    return r.code === 0 && r.stdout.includes("__ALREADY__");
   } catch {
     return false;
   }
 }
 
-/** 本机 Windows 独立安装检测 */
-async function isStandaloneInstalledLocalWindows(tool, version, installDir) {
-  const psq = (s) => `'${s.replace(/'/g, "''")}'`;
-  const installDirAbs = expandHomeLocal(installDir);
+/** Windows 本机与 SSH Windows 共用独立安装检测，路径均在目标机展开。 */
+async function isStandaloneInstalledWindows(host, tool, version, installDir) {
+  const installDirExpr = windowsPathExpr(installDir);
+  const rootExpr = windowsPathExpr("~/.codex/packages/standalone");
+  const storeExpr = windowsPathExpr("~/.local/share/claude/versions");
   const common = `
 $ver = ${psq(version)}
+$installDir = ${installDirExpr}
 function Get-Ver($exe) {
-  if (-not (Test-Path $exe)) { return '' }
+  if (-not (Test-Path -LiteralPath $exe)) { return '' }
   $o = (& $exe --version 2>&1 | Select-Object -First 1)
   if ("$o" -match '(\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.]+)?)') { return $Matches[1] }
   return ''
 }`;
   const script = tool === "codex"
     ? `${common}
-$root = ${psq(expandHomeLocal("~/.codex/packages/standalone"))}
+$root = ${rootExpr}
 $cur = Join-Path $root 'current'
-if (-not (Test-Path $cur)) { exit 0 }
+if (-not (Test-Path -LiteralPath $cur)) { exit 0 }
 $tgt = @((Get-Item $cur).Target)[0]
 if (-not $tgt -or -not ((Split-Path $tgt -Leaf) -like ($ver + '-*'))) { exit 0 }
-if ((Get-Ver (Join-Path ${psq(installDirAbs)} 'codex.exe')) -eq $ver) { Write-Output '__ALREADY__' }`
+if ((Get-Ver (Join-Path $installDir 'codex.exe')) -eq $ver) { Write-Output '__ALREADY__' }`
     : `${common}
-$store = ${psq(expandHomeLocal("~/.local/share/claude/versions"))}
-if (-not (Test-Path (Join-Path $store ($ver + '.exe')))) { exit 0 }
-if ((Get-Ver (Join-Path ${psq(installDirAbs)} 'claude.exe')) -eq $ver) { Write-Output '__ALREADY__' }`;
-  const r = await runLocalPwsh(script, { timeoutMs: 30_000 });
-  return r.output.includes("__ALREADY__");
+$store = ${storeExpr}
+if (-not (Test-Path -LiteralPath (Join-Path $store ($ver + '.exe')))) { exit 0 }
+if ((Get-Ver (Join-Path $installDir 'claude.exe')) -eq $ver) { Write-Output '__ALREADY__' }`;
+  const r = await runHostPwsh(host, script, { timeoutMs: 30_000 });
+  return r.code === 0 && r.stdout.includes("__ALREADY__");
 }
 
 /**
@@ -739,9 +571,7 @@ export async function installTool(host, tool, opts, onData) {
     await updateTool(host, tool, onData);
     return `${tool} 已按 npm 方式更新`;
   }
-  if (host.kind === "local") assertWindowsLocal("独立二进制安装");
-  else await assertHostBash(host, "独立二进制安装");
-
+  const runtime = await requireCapability(host, "standaloneInstall");
   const installDirInput = (opts.installDir || toolCfg.installDir || "~/.local/bin").trim();
   const versionSpec = opts.version || toolCfg.channel;
   const state = loadState();
@@ -766,12 +596,12 @@ export async function installTool(host, tool, opts, onData) {
     onData(`[skip] ${tool} ${version} 已是独立安装且入口生效，跳过下载与安装\n`);
   } else {
     const artifact = tool === "codex"
-      ? await codexArtifact(host, version, config, onData)
-      : await claudeArtifact(host, version, config, onData);
-    if (host.kind === "local") {
-      await installLocalWindows(host, tool, version, artifact, installDirInput, config, onData);
+      ? await codexArtifact(runtime, version, config, onData)
+      : await claudeArtifact(runtime, version, config, onData);
+    if (runtime.family === "windows") {
+      await installWindows(host, tool, version, artifact, installDirInput, config, onData);
     } else {
-      await installRemote(host, tool, version, artifact, installDirInput, config, onData);
+      await installBash(host, tool, version, artifact, installDirInput, config, onData);
     }
   }
 
@@ -819,15 +649,15 @@ export function effectiveProblems(probe, tool, target) {
   return out;
 }
 
-/** 远程安装：先试远程直连下载，失败则 hub 下载后 SSH 中转 */
-async function installRemote(host, tool, version, artifact, installDir, config, onData) {
-  const dirExpr = remotePathExpr(installDir);
+/** Bash 本机/远程安装：先试目标机直连下载，失败则 hub 下载后中转 */
+async function installBash(host, tool, version, artifact, installDir, config, onData) {
+  const dirExpr = bashPathExpr(installDir);
   const stagingRel = tool === "codex"
     ? "~/.codex/packages/standalone/.install-hub"
     : "~/.local/share/claude/versions/.install-hub";
   const pkgName = tool === "codex" ? (artifact.kind === "zip" ? "pkg.zip" : "pkg.tar.gz") : "pkg.bin";
   const pkgRel = `${stagingRel}/${pkgName}`;
-  const pkgExpr = remotePathExpr(pkgRel);
+  const pkgExpr = bashPathExpr(pkgRel);
 
   // 主机 prelude（代理/nvm 初始化等）必须在探测与安装脚本之前执行，否则内网机器的出网代理不生效、被误判为不可直连。
   // 放在 set -eu 之前：prelude 里的 nvm / source 不保证兼容 -e/-u。
@@ -840,24 +670,22 @@ async function installRemote(host, tool, version, artifact, installDir, config, 
   if (forceRelay) {
     onData("该主机配置为强制中转（preferRelay），跳过直连探测\n");
   } else {
-    const head = await runRemoteBash(
-      host.id,
+    const head = await runHostBash(
+      host,
       `${prelude}
 curl -fsSLI --connect-timeout 8 --max-time 20 -o /dev/null ${sq(artifact.url)} && echo __DIRECT_OK__ || echo __DIRECT_FAIL__`,
       { timeoutMs: 45_000 }
     );
-    direct = head.output.includes("__DIRECT_OK__");
-    onData(direct ? "远程可直连下载源\n" : "远程不可直连下载源\n");
+    direct = head.code === 0 && head.stdout.includes("__DIRECT_OK__");
+    onData(direct ? "目标机可直连下载源\n" : "目标机不可直连下载源\n");
   }
 
   if (!direct) {
     // hub 下载 → 校验 → 中转推送
     const localFile = path.join(DL_DIR, `${tool}-${version}-${artifact.target ?? artifact.platformKey}.${artifact.kind === "zip" ? "zip" : artifact.kind === "tar.gz" ? "tar.gz" : "bin"}`);
     await ensureDownloaded(localFile, artifact, config.download?.proxy ?? "", onData);
-    const r0 = await runRemoteBash(host.id, `mkdir -p ${remotePathExpr(stagingRel)} && rm -f ${pkgExpr}`, { timeoutMs: 30_000 });
-    if (r0.code !== 0) throw new Error("远程暂存目录准备失败");
     if (hubTransfer.isFull()) onData("[queue] hub 传输名额已满，排队等待…\n");
-    await hubTransfer.run(() => pushFileViaSsh(host, localFile, pkgRel, onData));
+    await hubTransfer.run(() => putFile(host, localFile, pkgRel, { onData }));
     onData("中转推送完成\n");
   }
 
@@ -865,16 +693,16 @@ curl -fsSLI --connect-timeout 8 --max-time 20 -o /dev/null ${sq(artifact.url)} &
     ? `curl -fsSL --connect-timeout 15 --max-time 900 --retry 2 -o "\$PKG" ${sq(artifact.url)}`
     : `mv -f ${pkgExpr} "\$PKG"`; // 移动而非复制：省一份 100~240MB 的远程磁盘占用与拷贝时间
 
-  const script = `${prelude}\n${buildRemoteInstallScript(tool, version, artifact, dirExpr, downloadStep, pkgExpr)}`;
-  const r = await runRemoteBash(host.id, script, { onData, timeoutMs: 15 * 60_000 });
-  if (r.code !== 0 || !r.output.includes("__INSTALL_OK__")) {
-    throw new Error(`远程安装失败（exit=${r.code}），详见日志`);
+  const script = `${prelude}\n${buildBashInstallScript(tool, version, artifact, dirExpr, downloadStep, pkgExpr)}`;
+  const r = await runHostBash(host, script, { onData, timeoutMs: 15 * 60_000 });
+  if (r.code !== 0 || !r.stdout.includes("__INSTALL_OK__")) {
+    throw new Error(`Bash 安装失败（exit=${r.code}），详见日志`);
   }
 }
 
-function buildRemoteInstallScript(tool, version, artifact, dirExpr, downloadStep, hubPkgExpr) {
+export function buildBashInstallScript(tool, version, artifact, dirExpr, downloadStep, hubPkgExpr) {
   const shaCheck = `echo "${artifact.sha256}  $PKG" | sha256sum -c -`;
-if (tool === "codex") {
+  if (tool === "codex") {
     return `set -eu
 VERSION=${sq(version)}
 TARGET=${sq(artifact.target)}
@@ -953,19 +781,31 @@ echo "$got" | grep -F "$VERSION" >/dev/null || { echo "[remote] 版本校验失�
 echo "__INSTALL_OK__"`;
 }
 
-/** 本机 Windows 安装 */
-async function installLocalWindows(host, tool, version, artifact, installDir, config, onData) {
+/** Windows 本机/SSH 安装：hub 校验安装包，SSH Windows 经 stdin 接收原始二进制。 */
+async function installWindows(host, tool, version, artifact, installDir, config, onData) {
   const localFile = path.join(DL_DIR, `${tool}-${version}-${artifact.target ?? artifact.platformKey}.${artifact.kind === "zip" ? "zip" : artifact.kind === "tar.gz" ? "tar.gz" : "bin"}`);
   await ensureDownloaded(localFile, artifact, config.download?.proxy ?? "", onData);
 
-  const installDirAbs = expandHomeLocal(installDir);
-  const psq = (s) => `'${s.replace(/'/g, "''")}'`;
+  const pkgPath = tool === "codex" ? "~/.codex/packages/standalone/.install-hub/pkg.tar.gz" : "~/.local/share/claude/.install-hub/pkg.bin";
+  if (hubTransfer.isFull()) onData("[queue] hub 传输名额已满，排队等待…\n");
+  await hubTransfer.run(() => putFile(host, localFile, pkgPath, { onData }));
+  const script = buildWindowsInstallScript(tool, version, artifact, installDir, pkgPath);
+  const r = await runHostPwsh(host, script, { onData, timeoutMs: 15 * 60_000 });
+  if (r.code !== 0 || !r.stdout.includes("__INSTALL_OK__")) {
+    throw new Error(`Windows 安装失败（exit=${r.code}），详见日志`);
+  }
+}
+
+export function buildWindowsInstallScript(tool, version, artifact, installDir, pkgPath) {
+  const installDirExpr = windowsPathExpr(installDir);
+  const rootExpr = windowsPathExpr("~/.codex/packages/standalone");
+  const claudeDirExpr = windowsPathExpr("~/.local/share/claude/versions");
+  const pkgExpr = windowsPathExpr(pkgPath);
   // 入口统一为「复制件」：先把旧入口改名为 .old（运行中的 exe 不能覆盖但可以改名），再复制新文件。
-  // 若 installDir 是旧版本遗留的 junction（指向 current\\bin），先拆掉并重建为真实目录，避免与版本库互相污染。
   const psEntryHelpers = `
 function Ensure-RealDir($d) {
-  if (Test-Path $d) {
-    $it = Get-Item $d -Force
+  if (Test-Path -LiteralPath $d) {
+    $it = Get-Item -LiteralPath $d -Force
     $tgt = @($it.Target) -join ';'
     if (($it.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $tgt -match 'packages[\\\\/]standalone') { cmd /c rmdir "$d" | Out-Null; Write-Output ("已拆除遗留的入口 junction: " + $d) }
   }
@@ -973,76 +813,66 @@ function Ensure-RealDir($d) {
 }
 function Install-Entry($src, $dst) {
   $old = $dst + '.old'
-  if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
-  if (Test-Path $dst) { Move-Item $dst $old -Force }
-  Copy-Item $src $dst -Force
+  if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+  if (Test-Path -LiteralPath $dst) { Move-Item -LiteralPath $dst -Destination $old -Force }
+  Copy-Item -LiteralPath $src -Destination $dst -Force
 }
 `;
-  let script;
-  if (tool === "codex") {
-    const root = expandHomeLocal("~/.codex/packages/standalone");
-    const rel = path.join(root, "releases", `${version}-${artifact.target}`);
-    script = psEntryHelpers + `
-$ErrorActionPreference = 'Stop'
-$pkg = ${psq(localFile)}
-$rel = ${psq(rel)}
-$root = ${psq(root)}
-$installDir = ${psq(installDirAbs)}
-$work = Join-Path $root (".install-" + $PID)
+  const toolScript = tool === "codex" ? `
+$rel = Join-Path $root ('releases\\' + ${psq(`${version}-${artifact.target}`)})
+$work = Join-Path $root ('.install-' + $PID)
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 try {
   tar -xzf $pkg -C $work
-  # package 布局定位：codex-package.json 或 bin\\codex.exe 所在目录
+  if ($LASTEXITCODE -ne 0) { throw "安装包解压失败" }
   $base = $work
-  if (-not (Test-Path (Join-Path $base 'bin\\codex.exe'))) {
-    $pj = Get-ChildItem $work -Recurse -Filter codex-package.json -File -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not (Test-Path -LiteralPath (Join-Path $base 'bin\\codex.exe'))) {
+    $pj = Get-ChildItem -LiteralPath $work -Recurse -Filter codex-package.json -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($pj) { $base = $pj.DirectoryName }
   }
-  if (-not (Test-Path (Join-Path $base 'bin\\codex.exe'))) {
+  if (-not (Test-Path -LiteralPath (Join-Path $base 'bin\\codex.exe'))) {
     throw "包内未找到 bin\\codex.exe（package 布局缺失）"
   }
-  if (Test-Path $rel) { Remove-Item $rel -Recurse -Force }
+  if (Test-Path -LiteralPath $rel) { Remove-Item -LiteralPath $rel -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $rel | Out-Null
-  Copy-Item (Join-Path $base '*') $rel -Recurse -Force
-  # current junction 原子替换（先建临时 junction 再改名）
+  Copy-Item -Path (Join-Path $base '*') -Destination $rel -Recurse -Force
   $cur = Join-Path $root 'current'
-  $tmpLink = Join-Path $root (".current-" + $PID)
-  if (Test-Path $tmpLink) { cmd /c rmdir "$tmpLink" | Out-Null }
+  $tmpLink = Join-Path $root ('.current-' + $PID)
+  if (Test-Path -LiteralPath $tmpLink) { cmd /c rmdir "$tmpLink" | Out-Null }
   New-Item -ItemType Junction -Path $tmpLink -Target $rel | Out-Null
-  if (Test-Path $cur) { cmd /c rmdir "$cur" | Out-Null }
-  Move-Item $tmpLink $cur
-  # 入口：复制 codex.exe 到 installDir（installDir 常与其他工具共用，不能整目录 junction）
+  if (Test-Path -LiteralPath $cur) { cmd /c rmdir "$cur" | Out-Null }
+  Move-Item -LiteralPath $tmpLink -Destination $cur
   $curBin = Join-Path $cur 'bin'
   Ensure-RealDir $installDir
   Install-Entry (Join-Path $curBin 'codex.exe') (Join-Path $installDir 'codex.exe')
-  Write-Output "入口为复制 codex.exe；codex-path/codex-resources 留在版本库，rg 等附属能力将使用系统 PATH 中的版本"
+  Write-Output '入口为复制 codex.exe；附属资源留在版本库'
   $got = (& (Join-Path $curBin 'codex.exe') --version 2>&1 | Select-Object -First 1)
-  Write-Output ("installed: " + $got)
+  Write-Output ('installed: ' + $got)
   if ($got -notmatch [regex]::Escape(${psq(version)})) { throw "版本校验失败: $got" }
   Write-Output '__INSTALL_OK__'
 } finally {
-  Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
-}`;
-  } else {
-
-    const dir = expandHomeLocal("~/.local/share/claude/versions");
-    script = psEntryHelpers + `
-$ErrorActionPreference = 'Stop'
-$pkg = ${psq(localFile)}
-$dir = ${psq(dir)}
-$installDir = ${psq(installDirAbs)}
+  Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+}` : `
+$dir = ${claudeDirExpr}
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Ensure-RealDir $installDir
 $dst = Join-Path $dir ${psq(version + ".exe")}
-Copy-Item $pkg $dst -Force
+Copy-Item -LiteralPath $pkg -Destination $dst -Force
 Install-Entry $dst (Join-Path $installDir 'claude.exe')
 $got = (& $dst --version 2>&1 | Select-Object -First 1)
-Write-Output ("installed: " + $got)
+Write-Output ('installed: ' + $got)
 if ($got -notmatch [regex]::Escape(${psq(version)})) { throw "版本校验失败: $got" }
 Write-Output '__INSTALL_OK__'`;
-  }
-  const r = await runLocalPwsh(script, { onData, timeoutMs: 5 * 60_000 });
-  if (r.code !== 0 || !r.output.includes("__INSTALL_OK__")) {
-    throw new Error(`本机安装失败（exit=${r.code}），详见日志`);
-  }
+
+  return `${psEntryHelpers}
+$ErrorActionPreference = 'Stop'
+$pkg = ${pkgExpr}
+$root = ${rootExpr}
+$installDir = ${installDirExpr}
+try {
+if ((Get-FileHash -LiteralPath $pkg -Algorithm SHA256).Hash.ToLower() -ne ${psq(artifact.sha256)}) { throw '安装包 sha256 校验失败' }
+${toolScript}
+} finally {
+  Remove-Item -LiteralPath $pkg -Force -ErrorAction SilentlyContinue
+}`;
 }

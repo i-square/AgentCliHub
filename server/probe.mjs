@@ -1,7 +1,8 @@
 // 深度探测：枚举目标主机上 codex/claude 的全部安装实例、PATH 视图、官方自动更新现状。
 // 只读：不写远程文件、不访问外网。远程 bash / 本机 pwsh 双实现，输出 __P__ 标记行，由本文件解析。
 import os from "node:os";
-import { detectHostShell, runHostPwsh, runHostBash } from "./hostShell.mjs";
+import { runHostPwsh, runHostBash } from "./hostShell.mjs";
+import { requireCapability } from "./capabilities.mjs";
 import { detectLocalPlatform, platformLabel } from "./platform.mjs";
 
 const PROBE_TIMEOUT_MS = 120_000;
@@ -334,14 +335,14 @@ function parseProbeOutput(host, output) {
  * @returns {Promise<object>} 结构化探测结果
  */
 export async function probeHost(host, onData = () => {}) {
-  const shell = await detectHostShell(host);
+  const shell = await requireCapability(host, "probe");
   const shellLabel = shell.family === "windows" ? "Windows PowerShell" : "Bash";
   onData(host.kind === "local" ? `[probe] 本机 ${platformLabel(detectLocalPlatform())} 探测…\n` : `[probe] SSH 远程探测 ${host.id}（${shellLabel}）…\n`);
   const result = shell.family === "windows"
     ? await runHostPwsh(host, WINDOWS_PS_PROBE, { onData: () => {}, timeoutMs: PROBE_TIMEOUT_MS })
     : await runHostBash(host, BASH_PROBE, { onData: () => {}, timeoutMs: PROBE_TIMEOUT_MS });
   if (result.code !== 0) throw new Error(`探测执行失败（exit=${result.code}）：主机离线或 ssh 异常`);
-  const parsed = parseProbeOutput(host, result.output);
+  const parsed = parseProbeOutput(host, result.stdout);
   if (!parsed.done) {
     onData(`[probe] 警告：探测未完整结束（exit=${result.code}），结果可能不全\n`);
   }

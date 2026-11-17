@@ -24,6 +24,8 @@ export interface Host {
   installDir: string;
   /** 强制走 hub 中转下载（直连慢/不通的内网主机） */
   preferRelay: boolean;
+  /** 技术支持范围；未探测时缺省，与屏蔽、同机禁用和在线状态分离。 */
+  capabilities?: Partial<Record<"check" | "probe" | "standaloneInstall" | "npmUpdate" | "autoUpdate" | "catalogPush" | "claudeSettings" | "restart" | "cleanup" | "pathRepair", { supported: boolean; reason: string }>>;
 }
 
 export interface HostState {

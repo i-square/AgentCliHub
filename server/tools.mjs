@@ -1,11 +1,11 @@
 // 领域逻辑：Codex CLI / Claude Code 的状态检查、npm 更新（含 rename 失败清理重试）、app-server 重启、模型目录推送
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runRemoteCmd } from "./exec.mjs";
-import { assertHostBash, detectHostShell, runHostPwsh, runHostBash } from "./hostShell.mjs";
-import { assertWindowsLocal, detectLocalPlatform } from "./platform.mjs";
+import { detectHostShell, runHostPwsh, runHostBash } from "./hostShell.mjs";
+import { requireCapability } from "./capabilities.mjs";
+import { bashQuote as sq, pwshQuote as psq, bashPathExpr, windowsPathExpr, readText, writeTextAtomic, removeFile } from "./hostFiles.mjs";
+import { detectLocalPlatform } from "./platform.mjs";
 
 export const TOOLS = {
   codex: { label: "Codex CLI", bin: "codex", npmPkg: "@openai/codex" },
@@ -29,27 +29,6 @@ export function bashPrelude(host) {
   if (host.prelude?.trim()) parts.push(host.prelude.trim());
   parts.push(AUTO_PRELUDE);
   return parts.join("\n");
-}
-
-/** bash 单引号包裹（内含单引号的安全转义） */
-function sq(s) {
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
-}
-
-/** 目标路径在远程 bash 中的展开表达式：~/ 前缀交给 $HOME，其余按字面量 */
-function remotePathExpr(p) {
-  const t = (p ?? "").trim();
-  if (t === "~") return '"$HOME"';
-  if (t.startsWith("~/")) return `"$HOME/${t.slice(2).replace(/["$`\\]/g, "\\$&")}"`;
-  return sq(t);
-}
-
-/** 本机路径展开：~ 前缀替换为 os.homedir() */
-function expandHomeLocal(p) {
-  const t = (p ?? "").trim();
-  if (t === "~") return os.homedir();
-  if (t.startsWith("~/") || t.startsWith("~\\")) return path.join(os.homedir(), t.slice(2));
-  return t;
 }
 
 /** 路径等价比较：展开 ~、统一分隔符；本机 Windows 不区分大小写 */
@@ -124,7 +103,7 @@ echo "home=$HOME"
 cfg="$HOME/.codex/config.toml"
 mcj=$(grep -E "^[[:space:]]*model_catalog_json[[:space:]]*=" "$cfg" 2>/dev/null | head -n 1 | sed -E "s/^[^\\"]*\\"([^\\"]*)\\".*$/\\1/")
 echo "catalogJson=$mcj"
-t=${remotePathExpr(catalogTarget)}
+t=${bashPathExpr(catalogTarget)}
 if [ -f "$t" ]; then
   h=$(sha256sum "$t" 2>/dev/null | cut -c1-12)
   [ -z "$h" ] && h=$(shasum -a 256 "$t" 2>/dev/null | cut -c1-12)
@@ -137,7 +116,6 @@ echo "__STATUS_END__"`;
 }
 
 function windowsStatusScript(catalogTarget) {
-  const targetPs = expandHomeLocal(catalogTarget).replace(/'/g, "''");
   return `
 $ErrorActionPreference = 'Continue'
 function Get-CmdVersion($name) {
@@ -168,17 +146,18 @@ if (Test-Path $cfg) {
   if ($hit) { $mcj = $hit.Matches[0].Groups[1].Value }
 }
 Write-Output ('catalogJson=' + $mcj)
-Write-Output ('catalogHash=' + (Get-CatalogHash '${targetPs}'))
+Write-Output ('catalogHash=' + (Get-CatalogHash ${windowsPathExpr(catalogTarget)}))
 Write-Output '__STATUS_END__'
 `;
 }
 
 export async function checkHost(host, onData, catalogTarget = DEFAULT_CATALOG_TARGET) {
-  const shell = await detectHostShell(host);
+  const shell = await requireCapability(host, "check");
   const result = shell.family === "windows"
     ? await runHostPwsh(host, windowsStatusScript(catalogTarget), { onData, timeoutMs: 120_000 })
     : await runHostBash(host, bashStatusScript(host, catalogTarget), { onData, timeoutMs: 120_000 });
-  const status = parseStatusBlock(result.output);
+  if (result.code !== 0) throw new Error(`状态检查失败（exit=${result.code}），请检查主机连通性`);
+  const status = parseStatusBlock(result.stdout);
   if (!status) throw new Error("未能解析状态输出，请检查主机连通性与 prelude 配置");
   return status;
 }
@@ -207,153 +186,26 @@ export function parseSettingsText(raw, where) {
   throw new Error(`${where} 不是合法的 JSON 对象，已中止（未做任何修改）`);
 }
 
-/**
- * 本机读取：仅 ENOENT 视为「不存在」，权限/IO 等其他错误一律上抛，避免把读取失败当成空配置而覆盖原文件。
- * 同时返回原文件的权限位（低 9 位），供写回时继承。
- */
-export async function readTextIfExists(file) {
-  try {
-    const raw = await fs.promises.readFile(file, "utf8");
-    const { mode } = await fs.promises.stat(file);
-    return { exists: true, raw, mode: mode & 0o777 };
-  } catch (err) {
-    if (err?.code === "ENOENT") return { exists: false, raw: "", mode: null };
-    throw new Error(`读取 ${file} 失败（${err.code ?? err.message}），已中止（未做任何修改）`);
-  }
-}
-
-/**
- * 远程读取脚本。标记里嵌入每次调用随机生成的 nonce：settings.json 的内容不可能事先知道它，
- * 因此无论配置里写了什么字符串，都不会被误当成协议标记（固定标记会与内容碰撞）。
- * 文件不存在 → 输出 MISSING 标记；cat 失败 → 非 0 退出。
- */
-export function buildRemoteSettingsReadScript(nonce) {
-  return [
-    'f="$HOME/.claude/settings.json"',
-    `if [ ! -e "$f" ] && [ ! -L "$f" ]; then echo __CCS_${nonce}_MISSING__; exit 0; fi`,
-    `echo __CCS_${nonce}_BEGIN__`,
-    'cat "$f" || exit 3',
-    "echo",
-    `echo __CCS_${nonce}_END__`
-  ].join("\n");
-}
-
-/**
- * 解析远程读取结果：{exists, raw}。优先接受完整的 BEGIN/END；ssh 失败、cat 失败、
- * 或输出里没有本次 nonce 的任何完整标记，均抛错（绝不当作文件不存在）。
- */
-export function parseRemoteSettingsRead(result, where, nonce) {
-  const { code } = result;
-  const output = result.stdout ?? result.output;
-  if (!/^[0-9a-f]+$/i.test(nonce)) throw new Error("内部错误：nonce 非法");
-  if (code !== 0) throw new Error(`读取 ${where} 失败（退出码 ${code}），已中止（未做任何修改）`);
-  const body = new RegExp(`__CCS_${nonce}_BEGIN__\\r?\\n([\\s\\S]*?)__CCS_${nonce}_END__`).exec(output);
-  if (body) return { exists: true, raw: body[1] };
-  if (new RegExp(`^__CCS_${nonce}_MISSING__\\r?$`, "m").test(output)) return { exists: false, raw: "" };
-  throw new Error(`读取 ${where} 失败（输出不完整），已中止（未做任何修改）`);
-}
-
-/**
- * 远程写入脚本（stdin 为 base64 内容）。settings.json 可能含 API Key，权限不得放宽：
- * - umask 077：新建文件默认仅属主可读写；
- * - 已有文件：mv 前把原 mode 继承给临时文件（GNU 用 --reference，BSD/macOS 回退 stat；都失败则保持 0600）；
- * - .bak：先删后建再 chmod 600，避免 cp 覆盖到一个已存在的、权限更宽的旧备份上；
- * - 失败时清理临时文件。
- */
-export function buildRemoteSettingsWriteScript() {
-  return [
-    "set -e",
-    "umask 077",
-    't="$HOME/.claude/settings.json"',
-    'mkdir -p "$(dirname "$t")"',
-    'tmp="$t.AgentCliHub-$$"',
-    `trap 'command rm -f "$tmp"' EXIT`,
-    'if [ -e "$t" ]; then',
-    '  command rm -f "$t.bak"',
-    '  command cp "$t" "$t.bak"',
-    '  chmod 600 "$t.bak"',
-    "fi",
-    'base64 -d > "$tmp"',
-    'if [ -e "$t" ]; then',
-    '  chmod --reference="$t" "$tmp" 2>/dev/null || chmod "$(stat -c %a "$t" 2>/dev/null || stat -f %Lp "$t" 2>/dev/null)" "$tmp" 2>/dev/null || true',
-    "fi",
-    'mv -f "$tmp" "$t"',
-    'echo "已写入 $t"'
-  ].join("\n");
-}
-
-/**
- * 把 modelPicker.options 写入目标主机的 ~/.claude/settings.json（其余字段保持不变，覆盖前备份为 .bak）。
- * 合并在 hub 侧完成：本机直接用 fs；远程先 ssh cat 读回，再按 pushCatalog 的方式 base64 写回，远端无需 node。
- */
-export async function applyCcPickerToHost(host, { options, catalogSlugs }, onData) {
-  if (host.kind === "local") {
-    const dest = path.join(os.homedir(), ".claude", "settings.json");
-    const { exists, raw, mode } = await readTextIfExists(dest);
-    const { settings, kept } = mergeModelPicker(parseSettingsText(raw, dest), options, catalogSlugs);
-    await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-    // 已有文件继承原权限，新文件仅属主可读写；备份一律 0600（POSIX 下生效，Windows 上无副作用）
-    const fileMode = exists ? mode : 0o600;
-    if (exists) {
-      await fs.promises.copyFile(dest, `${dest}.bak`);
-      await fs.promises.chmod(`${dest}.bak`, 0o600);
-    }
-    const tmp = `${dest}.AgentCliHub-tmp`;
-    await fs.promises.rm(tmp, { force: true });
-    await fs.promises.writeFile(tmp, JSON.stringify(settings, null, 2) + "\n", { encoding: "utf8", mode: fileMode });
-    await fs.promises.chmod(tmp, fileMode);
-    await fs.promises.rename(tmp, dest);
-    onData(`已写入 ${dest}：${options.length} 个模型，保留 ${kept} 个手工条目\n`);
-    return { count: options.length, kept };
-  }
-
-  await assertHostBash(host, "Claude 模型选择器写入");
-  const where = `${host.name} 的 ~/.claude/settings.json`;
-  const nonce = crypto.randomBytes(8).toString("hex");
-  const read = await runRemoteCmd(host.id, buildRemoteSettingsReadScript(nonce), { timeoutMs: 30_000 });
-  const { raw } = parseRemoteSettingsRead(read, where, nonce);
-  const { settings, kept } = mergeModelPicker(parseSettingsText(raw, where), options, catalogSlugs);
-
-  const b64 = Buffer.from(JSON.stringify(settings, null, 2) + "\n", "utf8").toString("base64");
-  const result = await runRemoteCmd(host.id, buildRemoteSettingsWriteScript(), { input: b64, onData, timeoutMs: 30_000 });
-  if (result.code !== 0) throw new Error("远程写入 settings.json 失败，详见日志");
+/** 合并目标机 Claude 配置；读取失败一律中止，已有配置写回前备份为 .bak。 */
+export async function applyCcPickerToHost(host, { options, catalogSlugs }, onData = () => {}) {
+  await requireCapability(host, "claudeSettings");
+  const targetPath = "~/.claude/settings.json";
+  const cur = await readText(host, targetPath);
+  if (cur.state === "error") throw new Error(`读取 ${targetPath} 失败，已中止：${cur.reason}`);
+  const { settings, kept } = mergeModelPicker(parseSettingsText(cur.content ?? "", targetPath), options, catalogSlugs);
+  await writeTextAtomic(host, targetPath, JSON.stringify(settings, null, 2) + "\n", { backupSuffix: ".bak", onData });
   onData(`${options.length} 个模型，保留 ${kept} 个手工条目\n`);
   return { count: options.length, kept };
 }
 
-/**
- * 推送合并后的 catalog 到目标主机：原子写入目标路径 + 删除 models_cache.json。
- * 本机直接用 fs；远程经 ssh stdin 传输 base64 内容（避开命令行长度上限），
- * cache 删除用 \rm 显式绕过 rm -i 类 alias 造成的交互阻塞。
- */
-export async function pushCatalog(host, rendered, { targetPath, onData }) {
-  if (host.kind === "local") {
-    const target = expandHomeLocal(targetPath);
-    await fs.promises.mkdir(path.dirname(target), { recursive: true });
-    const tmp = `${target}.AgentCliHub-tmp`;
-    await fs.promises.writeFile(tmp, rendered, "utf8");
-    await fs.promises.rename(tmp, target);
-    onData(`已写入 ${target}\n`);
-    const cache = path.join(path.dirname(target), "models_cache.json");
-    await fs.promises.rm(cache, { force: true });
-    onData(`已删除 ${cache}\n`);
-    return;
-  }
-  await assertHostBash(host, "catalog 推送");
-  const script = [
-    "set -e",
-    `t=${remotePathExpr(targetPath)}`,
-    `mkdir -p "$(dirname "$t")"`,
-    `tmp="$t.AgentCliHub-$$"`,
-    `base64 -d > "$tmp"`,
-    `mv -f "$tmp" "$t"`,
-    `echo "已写入 $t"`,
-    `command rm -f "$(dirname "$t")/models_cache.json"`,
-    `echo "已删除 $(dirname "$t")/models_cache.json"`
-  ].join("\n");
-  const b64 = Buffer.from(rendered, "utf8").toString("base64");
-  const result = await runRemoteCmd(host.id, script, { input: b64, onData, timeoutMs: 60_000 });
-  if (result.code !== 0) throw new Error("远程写入 catalog 失败，详见日志");
+/** 推送 catalog 后清除同目录的缓存；所有路径均在目标主机解释。 */
+export async function pushCatalog(host, rendered, { targetPath, onData = () => {} }) {
+  const runtime = await requireCapability(host, "catalogPush");
+  await writeTextAtomic(host, targetPath, rendered, { backupSuffix: "", onData });
+  const targetPaths = runtime.family === "windows" ? path.win32 : path.posix;
+  const cache = targetPaths.join(targetPaths.dirname(targetPath), "models_cache.json");
+  await removeFile(host, cache);
+  onData(`已删除 ${cache}\n`);
 }
 
 function bashUpdateScript(host, pkg) {
@@ -415,7 +267,6 @@ async function deletePaths(host, paths, onData) {
   } else {
     const shell = await detectHostShell(host);
     if (shell.family === "windows") {
-      const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
       const script = `$ErrorActionPreference = 'Stop'\n${paths.map((p) => `Remove-Item -LiteralPath ${psq(p)} -Recurse -Force`).join("\n")}`;
       await runHostPwsh(host, script, {
         onData: (c) => onData(`[cleanup] Remove-Item ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
@@ -432,13 +283,12 @@ async function deletePaths(host, paths, onData) {
 }
 
 async function runNpmInstall(host, pkg, onData) {
-  if (host.kind === "local") assertWindowsLocal("npm 安装与更新");
-  const shell = await detectHostShell(host);
+  const shell = await requireCapability(host, "npmUpdate");
   const result = shell.family === "windows"
     ? await runHostPwsh(host, windowsUpdateScript(pkg), { onData, timeoutMs: 600_000 })
     : await runHostBash(host, bashUpdateScript(host, pkg), { onData, timeoutMs: 600_000 });
   const npmRoot = /npmRoot=(.+)/.exec(result.output)?.[1]?.trim() ?? "";
-  return { code: parseExitCode(result.output), output: result.output, npmRoot };
+  return { code: result.code === 0 ? parseExitCode(result.stdout) : result.code, output: result.output, npmRoot };
 }
 
 export async function updateTool(host, toolId, onData) {
@@ -466,12 +316,12 @@ export async function updateTool(host, toolId, onData) {
 
 function bashRestartScript(host) {
   return `${bashPrelude(host)}
-pids=$(pgrep -f "codex.*app-server" || true)
+pids=$(pgrep -f "[c]odex.*app-server" || true)
 if [ -n "$pids" ]; then
   echo "发现 app-server 进程: $(echo $pids | tr '\\n' ' ')"
-  pkill -f "codex.*app-server"
+  pkill -f "[c]odex.*app-server"
   sleep 1
-  if pgrep -f "codex.*app-server" >/dev/null; then
+  if pgrep -f "[c]odex.*app-server" >/dev/null; then
     echo "WARN: 仍有 app-server 进程存活"
     exit 1
   else
@@ -499,15 +349,10 @@ if ($procs) {
 `;
 
 export async function restartAppServer(host, onData) {
-  if (host.kind === "local") assertWindowsLocal("app-server 重启");
-  const shell = await detectHostShell(host);
+  const shell = await requireCapability(host, "restart");
   const result = shell.family === "windows"
     ? await runHostPwsh(host, WINDOWS_RESTART_SCRIPT, { onData, timeoutMs: 60_000 })
     : await runHostBash(host, bashRestartScript(host), { onData, timeoutMs: 60_000 });
   if (result.code !== 0) throw new Error("app-server 重启失败，详见日志");
   return { ok: true };
-}
-
-export function isLocalHost(host) {
-  return host.kind === "local";
 }

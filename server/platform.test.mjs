@@ -6,7 +6,6 @@ import {
   localHostName,
   codexTarget,
   claudePlatform,
-  assertWindowsLocal,
   isLocalStateCompatible
 } from "./platform.mjs";
 
@@ -37,14 +36,6 @@ test("Claude 资产区分 OS、架构和 Linux libc", () => {
   assert.strictEqual(claudePlatform("Linux", "arm64", "glibc"), "linux-arm64");
   assert.strictEqual(claudePlatform("Linux", "x86_64", "musl"), "linux-x64-musl");
   assert.throws(() => claudePlatform("Linux", "ia32", "glibc"), /不支持的平台/);
-});
-
-test("非 Windows 本机不会误入 Windows 专用链路", () => {
-  assert.doesNotThrow(() => assertWindowsLocal("状态检查", { sysname: "windows", machine: "x64" }));
-  assert.throws(
-    () => assertWindowsLocal("状态检查", { sysname: "linux", machine: "arm64" }),
-    /Linux\/arm64.*状态检查.*不会再误走 Windows/
-  );
 });
 
 test("local 快照拒绝跨平台误用并校验平台标识", () => {

@@ -205,6 +205,8 @@ export default function App() {
   const updatable = useCallback(
     (h: Host, tool: ToolId): boolean => {
       if (!h.enabled || !data) return false;
+      const method = data.effectiveTools?.[h.id]?.[tool]?.method;
+      if (h.capabilities?.[method === "npm" ? "npmUpdate" : "standaloneInstall"]?.supported === false) return false;
       const { current, installed } = getToolDisplay(data.state[h.id] ?? {}, tool);
       const target = data.effectiveTools?.[h.id]?.[tool]?.target ?? "";
       if (!installed || !current || !target) return false;
@@ -468,6 +470,8 @@ function HostRow(props: {
 }) {
   const { host, state, tasks } = props;
   const busy = tasks.length > 0;
+  const unsupported = (tool: ToolId) => host.capabilities?.[props.etools?.[tool]?.method === "npm" ? "npmUpdate" : "standaloneInstall"]?.supported === false;
+  const limitations = Object.values(host.capabilities ?? {}).filter((c) => c && !c.supported).map((c) => c!.reason);
   return (
     <tr className={host.enabled ? "" : host.blocked ? "disabled blocked" : "disabled"}>
       <td>
@@ -485,6 +489,7 @@ function HostRow(props: {
           {host.kind === "local" && <span className="tag">本机</span>}
           {host.duplicateOfLocal && <span className="tag off" title="与 local 同 IP 且 shell 环境相同；请使用 local">同机禁用</span>}
           {host.blocked && <span className="tag off">已屏蔽</span>}
+          {limitations.length > 0 && <span className="tag" title={limitations.join("；")}>部分操作不支持</span>}
         </div>
         <div className="host-meta">
           {host.kind === "ssh" ? `${host.user}@${host.hostName}${host.port ? `:${host.port}` : ""}` : host.shell}
@@ -495,7 +500,7 @@ function HostRow(props: {
       <ToolCell
         display={getToolDisplay(state, "codex")}
         effective={props.etools?.codex}
-        disabled={!host.enabled || busy}
+        disabled={!host.enabled || busy || unsupported("codex")}
         onUpdate={() => props.onUpdate("codex")}
         onInstall={() => props.onInstall("codex")}
         extra={
@@ -514,7 +519,7 @@ function HostRow(props: {
       <ToolCell
         display={getToolDisplay(state, "claude")}
         effective={props.etools?.claude}
-        disabled={!host.enabled || busy}
+        disabled={!host.enabled || busy || unsupported("claude")}
         onUpdate={() => props.onUpdate("claude")}
         onInstall={() => props.onInstall("claude")}
         extra={<><ProbeBadges state={state} tool="claude" onShow={props.onShowProbe} /><button className="link" disabled={!host.enabled || busy} onClick={() => props.onInstall("claude")}>安装/切换</button></>}
@@ -1002,8 +1007,8 @@ function ProbeModal(props: { host: Host; config: Config; onAction: () => void; h
           {(["codex", "claude"] as const).map((t) => {
             const hasLib = t === "codex" ? p.pkgRoots.some((r) => r.sub === "standalone") : p.meta.claudeVersionsDir !== "(absent)";
             return (
-              <button key={t} className="ghost" disabled={!hasLib}
-                title={hasLib ? `清理 ${t} 旧版本（保留 current + 最新 2 个，跳过运行中）` : "无 standalone 版本库"}
+              <button key={t} className="ghost" disabled={!hasLib || props.host.capabilities?.cleanup?.supported === false}
+                title={props.host.capabilities?.cleanup?.reason || (hasLib ? `清理 ${t} 旧版本（保留 current + 最新 2 个，跳过运行中）` : "无 standalone 版本库")}
                 onClick={() => {
                   if (confirm(`清理 ${t} 的旧版本？\n保留 current 指向与最新 2 个，跳过正在运行的版本。`)) {
                     api.cleanupTool(props.host.id, t, 2).then(props.onAction).catch((e) => alert((e as Error).message));
@@ -1013,10 +1018,10 @@ function ProbeModal(props: { host: Host; config: Config; onAction: () => void; h
             );
           })}
           <button className="ghost"
-            title="把安装目录以去重置顶块写入 shell rc（远程）或注册表用户 PATH（本机），含备份"
+            title="把安装目录去重置顶：Bash 环境写 shell rc，Windows 环境写注册表用户 PATH，含备份"
             onClick={() => {
               const dir = props.host.installDir || props.config.tools.codex.installDir || "~/.local/bin";
-              if (confirm(`PATH 修复：将安装目录（${dir}）去重置顶到 PATH？\n远程写入 ~/.profile 与 shell rc（幂等块，自动备份）；本机写注册表用户 PATH（备份到 data/path-backups/）。\n新开的终端生效。`)) {
+              if (confirm(`PATH 修复：将安装目录（${dir}）去重置顶到 PATH？\nBash 环境写入 ~/.profile 与 shell rc；Windows 环境写注册表用户 PATH。写入前自动备份。\n新开的终端生效。`)) {
                 api.pathRepair(props.host.id, "codex").then(props.onAction).catch((e) => alert((e as Error).message));
               }
             }}
@@ -1059,6 +1064,7 @@ function InstallModal(props: {
   const [busy, setBusy] = useState(false);
 
   const versionSpec = channel === "custom" ? customVersion.trim() : channel;
+  const capability = host.capabilities?.[method === "npm" ? "npmUpdate" : "standaloneInstall"];
   const v = props.versions;
   const resolvedHint = (() => {
     if (channel === "custom") return customVersion.trim() || "（未填）";
@@ -1176,7 +1182,8 @@ function InstallModal(props: {
         </>
       )}
       <div className="modal-actions">
-        <button onClick={install} disabled={busy}>{busy ? "提交中…" : "开始安装"}</button>
+        {capability?.supported === false && <span className="muted">{capability.reason}</span>}
+        <button onClick={install} disabled={busy || capability?.supported === false}>{busy ? "提交中…" : "开始安装"}</button>
       </div>
     </Modal>
   );

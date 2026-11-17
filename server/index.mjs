@@ -29,7 +29,9 @@ import { refreshVersions, startVersionScheduler, versionsConfig } from "./versio
 import { probeHost } from "./probe.mjs";
 import { detectLocalPlatform, platformLabel } from "./platform.mjs";
 import { installTool, preflight, resolveToolConfig, resolveVersionSpec, isValidVersionSpec, applyAutoUpdate } from "./install.mjs";
-import { cleanupTool, repairPathLocal, repairPathRemote } from "./maintenance.mjs";
+import { cleanupTool, repairPath } from "./maintenance.mjs";
+import { getKnownRuntime } from "./hostShell.mjs";
+import { capabilitiesFor } from "./capabilities.mjs";
 
 const PORT = Number(process.env.PORT ?? 8722);
 const HOST = process.env.HOST ?? "127.0.0.1"; // 默认仅本机访问；此工具可执行远程命令，勿暴露到公网
@@ -69,7 +71,10 @@ app.get("/api/events", (req, res) => {
 app.get("/api/hosts", async (req, res) => {
   const config = loadConfig();
   const state = loadState();
-  const hosts = await buildEffectiveHostList(config);
+  const hosts = (await buildEffectiveHostList(config)).map((host) => {
+    const runtime = getKnownRuntime(host);
+    return { ...host, ...(runtime ? { capabilities: capabilitiesFor(runtime) } : {}) };
+  });
   const effectiveTools = {};
   for (const h of hosts) {
     effectiveTools[h.id] = {};
@@ -582,8 +587,7 @@ app.post("/api/hosts/:id/path-repair", (req, res) => {
     const config = loadConfig();
     const installDir = resolveToolConfig(config, host, tool).installDir;
     onData(`installDir: ${installDir}\n`);
-    if (host.kind === "local") return await repairPathLocal(installDir, onData);
-    return await repairPathRemote(host, installDir, onData);
+    return await repairPath(host, installDir, onData);
   });
 });
 
@@ -621,7 +625,7 @@ app.get("/api/tasks/:id", (req, res) => {
 });
 
 /** 同一主机上必须串行的写操作（共用暂存目录 / current 链接 / 配置文件） */
-const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair", "auto-update", "cc-picker-apply"]);
+const HOST_EXCLUSIVE = new Set(["install", "update", "cleanup", "path-repair", "auto-update", "cc-picker-apply", "catalog-push"]);
 
 /** 启动一个后台任务并立即返回任务 id */
 function startTask(req, res, action, label, run) {
@@ -633,7 +637,7 @@ function startTask(req, res, action, label, run) {
     const effective = (await buildEffectiveHostList(loadConfig())).find((h) => h.id === host.id);
     if (effective?.duplicateOfLocal) throw new Error(`${host.id} 与 local 同 IP 且 shell 环境相同，已自动禁用；请改用 local`);
     if (effective?.blocked) throw new Error(`${host.id} 已被屏蔽，请先取消屏蔽`);
-    return run(host, onData);
+    return run(effective ?? host, onData);
   };
   const exec = HOST_EXCLUSIVE.has(action)
     ? () => tasks.withHostLock(host.id, () => onData("[queue] 该主机有其他写操作进行中，已排队等待…\n"), runUsable)

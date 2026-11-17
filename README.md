@@ -10,8 +10,8 @@
 - **版本缓存**：仅 hub 本机查外网（codex：GitHub atom → api.github → releases.openai.com 降级链；claude：GCS stable/latest 双通道），默认 6 小时间隔（可配），启动时按上次检查时间决定；代理模板（socks5h 含认证内嵌）/ GitHub 镜像 / token 可配
 - **安装/切换**：官方同构布局（releases/<ver>-<target> + current 链接 + installDir 入口），sha256 校验（codex 走 SHA256SUMS 链），远程可直连则直连、否则 hub 下载后经 SSH 中转推送；installDir 必填可自定义（默认 ~/.local/bin，主机级覆盖），安装前 PATH 预检（逐上下文位置 + 遮蔽者清单 + 共享挂载警告）
 - **自动更新接管**：安装独立二进制时按设置写入目标机配置——codex 的 `check_for_update_on_startup` / `[features] daemon_auto_start` / daemon `updater.autoUpdateEnabled`，claude 的 `autoUpdatesChannel` / `env.DISABLE_AUTOUPDATER` / 固定版本时的 `minimumVersion`；默认全部禁用（含 codex 启动更新提示），统一由 hub 更新
-- **清理**：保留 current + 最新 2 个版本，跳过运行中进程占用（远程 /proc、本机进程路径）
-- **PATH 修复**（可选，显式触发）：远程写入「去重置顶」幂等块（`.profile` + shell rc，自动备份），本机写注册表用户 PATH（备份到 data/path-backups/）
+- **清理**：保留 current + 最新 2 个版本，跳过运行中进程占用（Linux 读取 `/proc`，Windows 读取进程路径）
+- **PATH 修复**（可选，显式触发）：Bash 环境写入「去重置顶」幂等块（`.profile` + 用户 shell rc，兼容 Bash/zsh）；Windows 环境写注册表用户 PATH，修改前在目标机备份，并在 hub 的 `data/path-backups/` 留存副本
 - **npm 兜底**：策略切到 npm 时沿用原有更新链路（rename 失败清理重试）
 
 ### 原有功能
@@ -19,6 +19,7 @@
 
 - **主机清单自动发现**：本机（Windows / pwsh，Linux / Bash）+ `~/.ssh/config` 中的 SSH 主机，按排除模式过滤（默认排除 `github.com`，可在设置中追加内部主机的排除模式）；与 local 同 IP 且 shell 环境相同的 SSH 条目自动标记「同机禁用」，仅 local 可操作
 - **屏蔽与同机禁用分离**：屏蔽状态持久化在 `data/config.json`，主机仍然列出但不进入全选、一键更新、全部检查/探测等批量操作；同机禁用是自动计算结果，不改变用户的屏蔽配置
+- **操作能力独立判断**：按目标运行时决定支持范围，`local` / `ssh` 使用相同规则；探测失败作为执行错误，不写入屏蔽状态。主机列表展示已知能力，未探测的 SSH 主机在任务入口解析环境
 - **状态检查**：各主机 codex / claude 当前版本 + npm registry 最新版本，一眼看出哪台该更新
 - **npm 更新**：`npm install -g @openai/codex@latest` / `@anthropic-ai/claude-code@latest`
   - 遇到 `rename ... failed`（EPERM/ENOENT）时，自动删除报错涉及的 npm 全局目录并重试一次（仅限 `npm root -g` 之内的路径，防止误删）
@@ -63,11 +64,16 @@ PM2 配置见根目录 `ecosystem.config.cjs`，生产部署监听 `0.0.0.0:8123
 
 ## 工作原理
 
-| 环节 | 本机 Windows | SSH 远程 Linux |
+连接方式与执行环境分别解析：`exec.mjs` 只启动本机进程或 SSH；`hostShell.mjs` 识别目标平台并选择 Bash/PowerShell；`hostFiles.mjs` 处理目标路径、三态读取、备份、原子写入和二进制流传输。安装器只分 Windows/Bash 两种实现。
+
+| 环节 | Windows（本机 / SSH） | Linux（本机 / SSH） |
 | --- | --- | --- |
-| 执行层 | `pwsh -EncodedCommand`（UTF-16LE base64） | `ssh host "echo <b64> \| base64 -d \| bash"`，规避多层引号转义 |
-| node/npm 定位 | 系统 PATH | 自动 prepend `~/.nvm/versions/node/*/bin`（最高版本优先），再叠加主机 prelude |
-| 版本检查 | `codex --version` / `claude --version` + `npm view <pkg> version` | 同上（在远程执行，尊重其网络/代理） |
+| 执行器 | 本机 `pwsh`；SSH 按探测/覆盖使用 `pwsh` 或 `powershell`，脚本采用 `-EncodedCommand` | `bash -c`；SSH 编码脚本放入命令参数，stdin 留给文件内容 |
+| node/npm 定位 | 系统 PATH；SSH 补齐目标机机器/用户 PATH | 自动 prepend `~/.nvm/versions/node/*/bin`，并使用主机 prelude |
+| 文件传输 | 本机文件流；SSH PowerShell 原始 stdin 流 | 本机文件流；SSH Bash 原始 stdin 流 |
+| 安装 / 清理 | Windows 实现 | Linux 实现 |
+
+macOS 支持检查、探测、npm 更新、配置写入、重启和 PATH 修复；当前独立安装与清理依赖 GNU/Linux 工具，能力入口会拒绝这两项操作。技术支持范围不改变 `enabled`、`blocked` 或 `duplicateOfLocal`。
 
 ### 非标准环境与代理
 
@@ -87,7 +93,10 @@ server/       Express 后端（无构建步骤）
   hosts.mjs     主机清单（ssh config 解析 + 覆盖）
   tools.mjs     检查 / 更新 / 重启 / catalog 推送的领域逻辑与脚本构建
   catalogs.mjs  模型 catalog 存储、校验、合并、OAI 下载、优先级重排
-  exec.mjs      本机 pwsh 与远程 ssh 执行层（支持 stdin 传输 payload）
+  exec.mjs      进程与 SSH 传输（标准流、超时、取消）
+  hostShell.mjs 运行时解析与 Bash / PowerShell 执行
+  hostFiles.mjs 目标路径、读取、备份、原子写入与文件流传输
+  capabilities.mjs 操作能力表与统一入口校验
   store.mjs     data/config.json 与 state.json 持久化
   tasks.mjs     任务与实时日志
 src/          React 前端（主机管理 / 模型目录 两页，目录页按需加载 CodeMirror）
@@ -109,5 +118,7 @@ npx playwright install chromium    # 仅 macOS 首次运行前安装；Windows/L
 npm run smoke:ui                   # 仪表盘 UI 冒烟（需先启动服务）
 node scripts/ui-smoke-catalogs.mjs # 模型目录页 UI 冒烟（需先启动服务）
 ```
+
+后端测试包含四组运行时契约（本机 Windows/Linux、SSH Windows/Linux）、文件传输失败与权限回归，以及 Bash/zsh 的 PATH 幂等验证。Linux 测试中的 SSH 以本机 shell 回环执行命令，不连接真实主机；Windows 契约测试不替代 Windows 实机安装验证。
 
 UI 冒烟在 Windows 使用系统 Edge、Linux 使用系统 Chrome；其他平台使用 Playwright Chromium。

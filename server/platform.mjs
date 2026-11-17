@@ -99,10 +99,3 @@ export function claudePlatform(sysname, machine, libc = "glibc") {
   }
   throw new Error(`不支持的平台: ${sysname} ${machine}`);
 }
-
-/** 仅允许进入已实现的 Windows 本机链路；其他系统不得误入 PowerShell/注册表实现。 */
-export function assertWindowsLocal(operation, platform = detectLocalPlatform()) {
-  if (platform.sysname !== "windows") {
-    throw new Error(`本机 ${platformLabel(platform)} 的${operation}尚未实现，请暂时通过 SSH 主机管理；不会再误走 Windows 专用逻辑`);
-  }
-}

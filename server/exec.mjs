@@ -1,4 +1,4 @@
-// 统一的命令执行层：本机走 pwsh/bash，远程走 ssh + 编码传输脚本（规避多层引号转义问题）
+// 传输层：只负责进程、SSH、标准流、超时和取消，不解释目标 shell 或业务脚本。
 import { spawn } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -6,20 +6,22 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 /**
  * @param {string} cmd
  * @param {string[]} args
- * @param {{onData?: (chunk: string) => void, timeoutMs?: number, input?: string | Buffer}} opts
- *   input：写入子进程 stdin 后关闭（用于经 ssh 向远程传输文件内容，避免命令行长度上限）
+ * @param {{onData?: (chunk: string) => void, timeoutMs?: number, input?: string | Buffer | import('node:stream').Readable, signal?: AbortSignal}} opts
+ *   input：流式传输时由 pipe 处理背压；未提供输入时也关闭 stdin，避免交互命令挂起。
  * @returns {Promise<{code: number, output: string, stdout: string, stderr: string}>}
  */
-function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) {
+export function runProcess(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input, signal } = {}) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      input?.destroy?.();
+      resolve({ code: -1, output: "[cancelled]\n", stdout: "", stderr: "[cancelled]\n" });
+      return;
+    }
     const child = spawn(cmd, args, { windowsHide: true });
     let output = "";
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      onData?.(`\n[timeout] 命令超过 ${Math.round(timeoutMs / 1000)}s，已终止\n`);
-    }, timeoutMs);
+    let failed = false;
 
     const handle = (chunk, stream) => {
       const text = chunk.toString();
@@ -28,63 +30,45 @@ function run(cmd, args, { onData, timeoutMs = DEFAULT_TIMEOUT_MS, input } = {}) 
       else stderr += text;
       onData?.(text);
     };
-    child.stdout.on("data", (chunk) => handle(chunk, "stdout"));
-    child.stderr.on("data", (chunk) => handle(chunk, "stderr"));
+    const stop = (message) => {
+      failed = true;
+      handle(message, "stderr");
+      input?.destroy?.();
+      child.kill("SIGKILL");
+    };
+    const abort = () => stop("\n[cancelled] 命令已取消\n");
+    const timer = setTimeout(() => stop(`\n[timeout] 命令超过 ${Math.round(timeoutMs / 1000)}s，已终止\n`), timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    // setEncoding 保留跨 chunk 的 UTF-8 字符，配置和日志中的中文不会被截断。
+    child.stdout.setEncoding("utf8").on("data", (chunk) => handle(chunk, "stdout"));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => handle(chunk, "stderr"));
     child.on("error", (err) => {
-      clearTimeout(timer);
-      onData?.(`\n[spawn error] ${err.message}\n`);
-      resolve({ code: -1, output, stdout, stderr });
+      failed = true;
+      handle(`\n[spawn error] ${err.message}\n`, "stderr");
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, output, stdout, stderr });
+      signal?.removeEventListener("abort", abort);
+      input?.destroy?.();
+      resolve({ code: failed ? -1 : code ?? -1, output, stdout, stderr });
     });
-    if (input !== undefined) {
-      child.stdin.on("error", () => {}); // 远程提前退出时忽略 EPIPE
-      child.stdin.write(input);
-      child.stdin.end();
+    child.stdin.on("error", (err) => {
+      if (err.code !== "EPIPE") stop(`\n[stdin error] ${err.message}\n`);
+    });
+    if (input?.pipe) {
+      input.once("error", (err) => stop(`\n[input error] ${err.message}\n`));
+      input.pipe(child.stdin);
+    } else {
+      child.stdin.end(input);
     }
   });
 }
 
-/** 本机 Windows：通过 pwsh -EncodedCommand 执行（UTF-16LE base64） */
-export function runLocalPwsh(script, opts = {}) {
-  const encoded = Buffer.from(script, "utf16le").toString("base64");
-  return run("pwsh", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], opts);
-}
-
-/** 本机 Bash：脚本作为独立参数传递，stdin 仍可用于传输 payload。 */
-export function runLocalBash(script, opts = {}) {
-  return run("bash", ["-c", script], opts);
-}
-
-/** 远程 Linux：脚本 base64 后经 ssh 传输，由 bash 执行 */
-export function runRemoteBash(alias, script, opts = {}) {
-  const b64 = Buffer.from(script, "utf8").toString("base64");
-  const remoteCmd = `echo ${b64} | base64 -d | bash`;
-  return run(
-    "ssh",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, remoteCmd],
-    opts
-  );
-}
-
-/** 远程 Windows：按检测结果选择 pwsh / Windows PowerShell，并用 UTF-16LE base64 传输脚本 */
-export function runRemotePwsh(alias, script, { executable = "pwsh", ...opts } = {}) {
-  const exe = executable === "powershell" ? "powershell" : "pwsh";
-  const encoded = Buffer.from(script, "utf16le").toString("base64");
-  return run(
-    "ssh",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, `${exe} -NoProfile -NonInteractive -EncodedCommand ${encoded}`],
-    opts
-  );
-}
-
 /** 远程执行原生命令（stdin 可携带 payload，如 base64 编码的文件内容） */
-export function runRemoteCmd(alias, cmd, opts = {}) {
-  return run(
+export function runSsh(alias, cmd, opts = {}) {
+  return runProcess(
     "ssh",
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, cmd],
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "--", alias, cmd],
     opts
   );
 }
