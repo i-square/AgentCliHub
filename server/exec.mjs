@@ -64,6 +64,17 @@ export function runRemoteBash(alias, script, opts = {}) {
   );
 }
 
+/** 远程 Windows：按检测结果选择 pwsh / Windows PowerShell，并用 UTF-16LE base64 传输脚本 */
+export function runRemotePwsh(alias, script, { executable = "pwsh", ...opts } = {}) {
+  const exe = executable === "powershell" ? "powershell" : "pwsh";
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return run(
+    "ssh",
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", alias, `${exe} -NoProfile -NonInteractive -EncodedCommand ${encoded}`],
+    opts
+  );
+}
+
 /** 远程执行原生命令（stdin 可携带 payload，如 base64 编码的文件内容） */
 export function runRemoteCmd(alias, cmd, opts = {}) {
   return run(

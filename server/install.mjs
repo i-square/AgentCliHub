@@ -12,6 +12,8 @@ import { loadState, saveState } from "./store.mjs";
 import { updateTool, bashPrelude } from "./tools.mjs";
 import { curlText } from "./versions.mjs";
 import { probeHost } from "./probe.mjs";
+import { codexTarget, claudePlatform, detectLocalPlatform, assertWindowsLocal } from "./platform.mjs";
+import { assertHostBash } from "./hostShell.mjs";
 
 const GCS_BASE =
   "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
@@ -146,36 +148,6 @@ async function githubAssetDigest(version, assetName, { proxy = "", token = "" } 
 
 // ---------- 平台与资产 ----------
 
-function codexTarget(sysname, machine) {
-  const s = sysname.toLowerCase();
-  const m = machine.toLowerCase();
-  if (s.includes("linux")) {
-    if (m === "x86_64" || m === "amd64") return "x86_64-unknown-linux-musl";
-    if (m === "aarch64" || m === "arm64") return "aarch64-unknown-linux-musl";
-  }
-  if (s.includes("darwin")) {
-    if (m === "arm64" || m === "aarch64") return "aarch64-apple-darwin";
-    if (m === "x86_64") return "x86_64-apple-darwin";
-  }
-  if (s.includes("windows")) {
-    if (m === "x64" || m === "x86_64" || m === "amd64") return "x86_64-pc-windows-msvc";
-    if (m === "arm64" || m === "aarch64") return "aarch64-pc-windows-msvc";
-  }
-  throw new Error(`不支持的平台: ${sysname} ${machine}`);
-}
-
-function claudePlatform(sysname, machine, libc = "glibc") {
-  const s = sysname.toLowerCase();
-  const m = machine.toLowerCase();
-  if (s.includes("linux")) {
-    const arch = m === "aarch64" || m === "arm64" ? "arm64" : "x64";
-    return `linux-${arch}${libc === "musl" ? "-musl" : ""}`;
-  }
-  if (s.includes("darwin")) return m === "arm64" || m === "aarch64" ? "darwin-arm64" : "darwin-x64";
-  if (s.includes("windows")) return m === "arm64" || m === "aarch64" ? "win32-arm64" : "win32-x64";
-  throw new Error(`不支持的平台: ${sysname} ${machine}`);
-}
-
 async function remoteUname(host) {
   const r = await runRemoteBash(
     host.id,
@@ -194,7 +166,7 @@ async function remoteUname(host) {
 /** 组装 codex 资产信息：官方 package 资产 + SHA256SUMS 校验链（与官方安装器一致） */
 async function codexArtifact(host, version, config, onData) {
   const { sysname, machine } = host.kind === "local"
-    ? { sysname: "windows", machine: process.arch }
+    ? detectLocalPlatform()
     : await remoteUname(host);
   const target = codexTarget(sysname, machine);
   onData(`平台: ${sysname}/${machine} → ${target}\n`);
@@ -231,7 +203,7 @@ async function codexArtifact(host, version, config, onData) {
 /** 组装 claude 资产信息 { url, sha256, platformKey } */
 async function claudeArtifact(host, version, config, onData) {
   const { sysname, machine, libc } = host.kind === "local"
-    ? { sysname: "windows", machine: process.arch, libc: "" }
+    ? detectLocalPlatform()
     : await remoteUname(host);
   const platformKey = claudePlatform(sysname, machine, libc);
   onData(`平台: ${sysname}/${machine}${libc ? `/${libc}` : ""} → ${platformKey}\n`);
@@ -507,6 +479,7 @@ export function editClaudeSettings(text, { disableAutoUpdater, channel, minimumV
  * @returns {Promise<{changed: boolean, warned: boolean}>}
  */
 async function takeoverAutoUpdate(host, tool, config, { pinnedVersion = "", channel = "" } = {}, onData = () => {}) {
+  await assertHostBash(host, "自动更新配置写入");
   const au = config.autoUpdate?.[tool] ?? {};
   let changed = false;
   let warned = false;
@@ -697,7 +670,7 @@ export function preflight(host, tool, installDir, state) {
  */
 async function isStandaloneInstalled(host, tool, version, installDir) {
   try {
-    if (host.kind === "local") return await isStandaloneInstalledLocal(tool, version, installDir);
+    if (host.kind === "local") return await isStandaloneInstalledLocalWindows(tool, version, installDir);
     const dirExpr = remotePathExpr(installDir);
     const verOf = `head -n1 | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?' | head -n1`;
     const script = tool === "codex"
@@ -725,7 +698,8 @@ exit 0`;
   }
 }
 
-async function isStandaloneInstalledLocal(tool, version, installDir) {
+/** 本机 Windows 独立安装检测 */
+async function isStandaloneInstalledLocalWindows(tool, version, installDir) {
   const psq = (s) => `'${s.replace(/'/g, "''")}'`;
   const installDirAbs = expandHomeLocal(installDir);
   const common = `
@@ -765,6 +739,8 @@ export async function installTool(host, tool, opts, onData) {
     await updateTool(host, tool, onData);
     return `${tool} 已按 npm 方式更新`;
   }
+  if (host.kind === "local") assertWindowsLocal("独立二进制安装");
+  else await assertHostBash(host, "独立二进制安装");
 
   const installDirInput = (opts.installDir || toolCfg.installDir || "~/.local/bin").trim();
   const versionSpec = opts.version || toolCfg.channel;
@@ -793,7 +769,7 @@ export async function installTool(host, tool, opts, onData) {
       ? await codexArtifact(host, version, config, onData)
       : await claudeArtifact(host, version, config, onData);
     if (host.kind === "local") {
-      await installLocal(host, tool, version, artifact, installDirInput, config, onData);
+      await installLocalWindows(host, tool, version, artifact, installDirInput, config, onData);
     } else {
       await installRemote(host, tool, version, artifact, installDirInput, config, onData);
     }
@@ -978,7 +954,7 @@ echo "__INSTALL_OK__"`;
 }
 
 /** 本机 Windows 安装 */
-async function installLocal(host, tool, version, artifact, installDir, config, onData) {
+async function installLocalWindows(host, tool, version, artifact, installDir, config, onData) {
   const localFile = path.join(DL_DIR, `${tool}-${version}-${artifact.target ?? artifact.platformKey}.${artifact.kind === "zip" ? "zip" : artifact.kind === "tar.gz" ? "tar.gz" : "bin"}`);
   await ensureDownloaded(localFile, artifact, config.download?.proxy ?? "", onData);
 

@@ -1,5 +1,6 @@
 // 主机清单：本机 + ~/.ssh/config 中的 SSH 主机（按配置排除）
 import { parseSshConfig, globToRegExp } from "./sshConfig.mjs";
+import { localHostName } from "./platform.mjs";
 
 export function buildHostList(config) {
   const excludes = (config.excludePatterns ?? []).map(globToRegExp);
@@ -15,7 +16,7 @@ export function buildHostList(config) {
     }));
 
   const hosts = [
-    { id: "local", kind: "local", name: "local (本机 Windows)", hostName: "", user: "", port: null },
+    { id: "local", kind: "local", name: localHostName(), hostName: "", user: "", port: null },
     ...sshHosts
   ];
 
@@ -27,7 +28,8 @@ export function buildHostList(config) {
       prelude: o.prelude ?? "",
       note: o.note ?? "",
       installDir: o.installDir ?? "",
-      preferRelay: o.preferRelay ?? false
+      preferRelay: o.preferRelay ?? false,
+      shell: o.shell ?? ""
     };
   });
 }

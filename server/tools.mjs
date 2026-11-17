@@ -3,7 +3,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runLocalPwsh, runRemoteBash, runRemoteCmd } from "./exec.mjs";
+import { runRemoteCmd } from "./exec.mjs";
+import { assertHostBash, detectHostShell, runHostPwsh, runHostBash } from "./hostShell.mjs";
+import { assertWindowsLocal, detectLocalPlatform } from "./platform.mjs";
 
 export const TOOLS = {
   codex: { label: "Codex CLI", bin: "codex", npmPkg: "@openai/codex" },
@@ -73,7 +75,9 @@ export function catalogReadiness(host, st, targetPath) {
     return { ready: false, reason: "该主机 config.toml 未开启 model_catalog_json，codex 不会加载本地 catalog 文件" };
   }
   const home = host.kind === "local" ? os.homedir() : st.home ?? "~";
-  const caseInsensitive = host.kind === "local";
+  const caseInsensitive = host.kind === "local"
+    ? detectLocalPlatform().sysname === "windows"
+    : st.probe?.meta?.shell === "pwsh" || /^Windows/i.test(st.probe?.meta?.uname ?? "");
   if (normalizeCatalogPath(configured, home, caseInsensitive) !== normalizeCatalogPath(targetPath, home, caseInsensitive)) {
     return { ready: false, reason: `config.toml 中的路径「${configured}」与目标路径「${targetPath}」不一致` };
   }
@@ -107,7 +111,7 @@ function parseStatusBlock(output) {
   };
 }
 
-function remoteStatusScript(host, catalogTarget) {
+function bashStatusScript(host, catalogTarget) {
   return `${bashPrelude(host)}
 echo "__STATUS_BEGIN__"
 echo "npmRoot=$(npm root -g 2>/dev/null)"
@@ -132,7 +136,7 @@ fi
 echo "__STATUS_END__"`;
 }
 
-function localStatusScript(catalogTarget) {
+function windowsStatusScript(catalogTarget) {
   const targetPs = expandHomeLocal(catalogTarget).replace(/'/g, "''");
   return `
 $ErrorActionPreference = 'Continue'
@@ -170,10 +174,11 @@ Write-Output '__STATUS_END__'
 }
 
 export async function checkHost(host, onData, catalogTarget = DEFAULT_CATALOG_TARGET) {
-  const result =
-    host.kind === "local"
-      ? await runLocalPwsh(localStatusScript(catalogTarget), { onData, timeoutMs: 120_000 })
-      : await runRemoteBash(host.id, remoteStatusScript(host, catalogTarget), { onData, timeoutMs: 120_000 });
+  if (host.kind === "local") assertWindowsLocal("状态检查");
+  const shell = await detectHostShell(host);
+  const result = shell.family === "windows"
+    ? await runHostPwsh(host, windowsStatusScript(catalogTarget), { onData, timeoutMs: 120_000 })
+    : await runHostBash(host, bashStatusScript(host, catalogTarget), { onData, timeoutMs: 120_000 });
   const status = parseStatusBlock(result.output);
   if (!status) throw new Error("未能解析状态输出，请检查主机连通性与 prelude 配置");
   return status;
@@ -303,6 +308,7 @@ export async function applyCcPickerToHost(host, { options, catalogSlugs }, onDat
     return { count: options.length, kept };
   }
 
+  await assertHostBash(host, "Claude 模型选择器写入");
   const where = `${host.name} 的 ~/.claude/settings.json`;
   const nonce = crypto.randomBytes(8).toString("hex");
   const read = await runRemoteCmd(host.id, buildRemoteSettingsReadScript(nonce), { timeoutMs: 30_000 });
@@ -334,6 +340,7 @@ export async function pushCatalog(host, rendered, { targetPath, onData }) {
     onData(`已删除 ${cache}\n`);
     return;
   }
+  await assertHostBash(host, "catalog 推送");
   const script = [
     "set -e",
     `t=${remotePathExpr(targetPath)}`,
@@ -350,14 +357,14 @@ export async function pushCatalog(host, rendered, { targetPath, onData }) {
   if (result.code !== 0) throw new Error("远程写入 catalog 失败，详见日志");
 }
 
-function remoteUpdateScript(host, pkg) {
+function bashUpdateScript(host, pkg) {
   return `${bashPrelude(host)}
 echo "npmRoot=$(npm root -g 2>/dev/null)"
 npm install -g "${pkg}@latest" 2>&1
 echo "__EXIT_CODE__=$?"`;
 }
 
-function localUpdateScript(pkg) {
+function windowsUpdateScript(pkg) {
   return `
 $ErrorActionPreference = 'Continue'
 Write-Output ('npmRoot=' + ((npm root -g 2>$null) | Select-Object -Last 1))
@@ -407,20 +414,30 @@ async function deletePaths(host, paths, onData) {
       await fs.promises.rm(p, { recursive: true, force: true });
     }
   } else {
-    const quoted = paths.map(sq).join(" ");
-    // command rm：rm 处于参数位不被 alias 展开，同时绕过同名函数（比 \rm 更强），
-    // 规避主机把 rm 包装成交互式确认脚本（需输入 YES）导致删除卡死
-    await runRemoteBash(host.id, `command rm -rf -- ${quoted}`, {
-      onData: (c) => onData(`[cleanup] rm -rf ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
-    });
+    const shell = await detectHostShell(host);
+    if (shell.family === "windows") {
+      const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
+      const script = `$ErrorActionPreference = 'Stop'\n${paths.map((p) => `Remove-Item -LiteralPath ${psq(p)} -Recurse -Force`).join("\n")}`;
+      await runHostPwsh(host, script, {
+        onData: (c) => onData(`[cleanup] Remove-Item ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
+      });
+    } else {
+      const quoted = paths.map(sq).join(" ");
+      // command rm：rm 处于参数位不被 alias 展开，同时绕过同名函数（比 \rm 更强），
+      // 规避主机把 rm 包装成交互式确认脚本（需输入 YES）导致删除卡死
+      await runHostBash(host, `command rm -rf -- ${quoted}`, {
+        onData: (c) => onData(`[cleanup] rm -rf ${paths.join(" , ")}${c ? `\n${c}` : "\n"}`)
+      });
+    }
   }
 }
 
 async function runNpmInstall(host, pkg, onData) {
-  const result =
-    host.kind === "local"
-      ? await runLocalPwsh(localUpdateScript(pkg), { onData, timeoutMs: 600_000 })
-      : await runRemoteBash(host.id, remoteUpdateScript(host, pkg), { onData, timeoutMs: 600_000 });
+  if (host.kind === "local") assertWindowsLocal("npm 安装与更新");
+  const shell = await detectHostShell(host);
+  const result = shell.family === "windows"
+    ? await runHostPwsh(host, windowsUpdateScript(pkg), { onData, timeoutMs: 600_000 })
+    : await runHostBash(host, bashUpdateScript(host, pkg), { onData, timeoutMs: 600_000 });
   const npmRoot = /npmRoot=(.+)/.exec(result.output)?.[1]?.trim() ?? "";
   return { code: parseExitCode(result.output), output: result.output, npmRoot };
 }
@@ -448,7 +465,7 @@ export async function updateTool(host, toolId, onData) {
   return { ok: true, retried: true };
 }
 
-function remoteRestartScript(host) {
+function bashRestartScript(host) {
   return `${bashPrelude(host)}
 pids=$(pgrep -f "codex.*app-server" || true)
 if [ -n "$pids" ]; then
@@ -466,7 +483,7 @@ else
 fi`;
 }
 
-const LOCAL_RESTART_SCRIPT = `
+const WINDOWS_RESTART_SCRIPT = `
 $ErrorActionPreference = 'Continue'
 $procs = Get-CimInstance Win32_Process | Where-Object {
   $_.CommandLine -match 'app-server' -and $_.CommandLine -match 'codex'
@@ -483,10 +500,11 @@ if ($procs) {
 `;
 
 export async function restartAppServer(host, onData) {
-  const result =
-    host.kind === "local"
-      ? await runLocalPwsh(LOCAL_RESTART_SCRIPT, { onData, timeoutMs: 60_000 })
-      : await runRemoteBash(host.id, remoteRestartScript(host), { onData, timeoutMs: 60_000 });
+  if (host.kind === "local") assertWindowsLocal("app-server 重启");
+  const shell = await detectHostShell(host);
+  const result = shell.family === "windows"
+    ? await runHostPwsh(host, WINDOWS_RESTART_SCRIPT, { onData, timeoutMs: 60_000 })
+    : await runHostBash(host, bashRestartScript(host), { onData, timeoutMs: 60_000 });
   if (result.code !== 0) throw new Error("app-server 重启失败，详见日志");
   return { ok: true };
 }

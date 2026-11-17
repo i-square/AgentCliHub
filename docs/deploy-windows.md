@@ -59,6 +59,12 @@ npm uninstall -g pm2 pm2-windows-startup
 New-NetFirewallRule -DisplayName "AgentCliHub 8123" -Direction Inbound -Protocol TCP -LocalPort 8123 -Action Allow -Profile Private
 ```
 
+## Windows OpenSSH 中找不到 codex / claude
+
+桌面里的 pwsh / PowerShell 通常由 Explorer 启动，会获得机器 PATH 与当前用户 PATH；Windows OpenSSH 会话是非登录、非交互上下文，未必继承完整的用户 PATH，也不会加载 hub 明确关闭的 PowerShell profile。因此本机终端执行 `codex --version` 正常，并不代表 SSH 会话的 PATH 相同。
+
+hub 的远程 PowerShell 执行层会在每次调用前合并「机器 PATH + 用户 PATH + 当前 SSH PATH」，仅修改该次子进程环境，不写注册表、不依赖 profile。手工 SSH 会话若需要同样效果，可检查「用户环境变量 Path」（`HKCU\Environment`），或在远程 PowerShell profile 中合并上述 PATH；不要为这个问题把 OpenSSH 默认 shell 改成 WSL bash。OpenSSH 默认 shell 由 `HKLM\SOFTWARE\OpenSSH\DefaultShell` 控制，与 PATH 是两个独立问题。
+
 ## 后台启动的坑：Job Object（重要）
 
 Windows 的 Job Object 在宿主进程退出时会**连带终止组内所有进程**。从带 Job 的宿主里直接启动 PM2（Codex/自动化代理会话、部分 IDE 集成终端、CI runner 等），daemon 与业务进程会随宿主退出被系统一并清理：表现为"退出宿主后 8123 打不开"（本机曾两次踩中，根因即会话内 `pm2 start / resurrect` 从零拉起 daemon）。普通用户终端启动、以及登录自启（pm2-windows-startup 由 explorer 拉起）不受影响。

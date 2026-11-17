@@ -95,7 +95,7 @@ data/         运行时配置与状态快照（不入库）
 ## 安全
 
 - `npm start` 默认只绑定 `127.0.0.1`；PM2 生产部署（`ecosystem.config.cjs`）绑定 `0.0.0.0:8123`。本工具能以你的身份在各主机执行命令，仅在受信内网使用，**切勿暴露公网**（详见部署文档）。
-- SSH 全部走 `~/.ssh/config` 的既有配置与免密登录（`BatchMode=yes`），不存储任何密码。
+- SSH 全部走 `~/.ssh/config` 的既有配置与免密登录（`BatchMode=yes`），不存储任何密码。连接后自动识别 Windows PowerShell / Bash，避免 Windows OpenSSH 被错误切入 WSL；可用 `hostOverrides.<id>.shell` 显式覆盖为 `pwsh`、`powershell` 或 `bash`。远程 Windows 调用会合并注册表机器/用户 PATH 与 SSH 当前 PATH（仅当次子进程生效）。
 
 ## 开发
 

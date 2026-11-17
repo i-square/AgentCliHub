@@ -20,7 +20,7 @@ export const DEFAULT_HOST_PRELUDES = {};
 const DEFAULT_CONFIG = {
   // ssh config 中匹配这些模式的主机不会出现在管理列表
   excludePatterns: ["github.com"],
-  // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string } }
+  // 每主机覆盖：{ [hostId]: { enabled?: boolean, prelude?: string, note?: string, shell?: "pwsh"|"powershell"|"bash" } }
   hostOverrides: {},
   // 模型目录：OAI 下载源、推送目标路径、OAI 补丁开关、各 catalog 的优先级分段
   // 工具安装策略：method=standalone(默认)|npm(兜底)；installDir 空=官方默认（远程 ~/.local/bin，本机见安装器）；

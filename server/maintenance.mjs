@@ -1,11 +1,13 @@
 // 维护操作：旧版本清理（保留 current + 最新 N 个，跳过运行中进程占用）与 PATH 可选修复。
-// PATH 修复默认不主动执行，仅在用户显式触发时运行；远程写 managed 置顶块，本机写注册表用户 PATH。
+// PATH 修复默认不主动执行，仅在用户显式触发时运行；远程写 managed 置顶块，本机 Windows 写注册表用户 PATH。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runLocalPwsh, runRemoteBash } from "./exec.mjs";
 import { remotePathExpr, expandHomeLocal } from "./install.mjs";
+import { assertWindowsLocal } from "./platform.mjs";
+import { assertHostBash } from "./hostShell.mjs";
 
 const dataDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "data");
 const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -19,7 +21,9 @@ const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
  * @param {string} installDir 该主机该工具实际生效的入口目录（用于定位 claude 的 current）
  */
 export async function cleanupTool(host, tool, keep = 2, onData = () => {}, installDir = "~/.local/bin") {
-  const script = host.kind === "local" ? localCleanupScript(tool, keep, installDir) : remoteCleanupScript(tool, keep, installDir);
+  if (host.kind === "local") assertWindowsLocal("旧版本清理");
+  else await assertHostBash(host, "旧版本清理");
+  const script = host.kind === "local" ? windowsCleanupScript(tool, keep, installDir) : remoteCleanupScript(tool, keep, installDir);
   const r = host.kind === "local"
     ? await runLocalPwsh(script, { onData, timeoutMs: 120_000 })
     : await runRemoteBash(host.id, script, { onData, timeoutMs: 120_000 });
@@ -71,7 +75,7 @@ echo "__CLEANUP_OK__"`;
 }
 
 /** 本机 Windows 清理 */
-function localCleanupScript(tool, keep, installDir) {
+function windowsCleanupScript(tool, keep, installDir) {
   const root = path.join(os.homedir(), ".codex", "packages", "standalone");
   const listDir = tool === "codex" ? path.join(root, "releases") : path.join(os.homedir(), ".local", "share", "claude", "versions");
   const currentPath = path.join(root, "current");
@@ -119,6 +123,7 @@ Write-Output '__CLEANUP_OK__'`;
 
 /** 远程：把 installDir 以「去重置顶」managed 块写入 ~/.profile 与 shell rc（幂等 + 备份） */
 export async function repairPathRemote(host, installDir, onData = () => {}) {
+  await assertHostBash(host, "PATH 修复");
   const dirExpr = remotePathExpr(installDir);
   const block = [
     "# >>> AgentCliHub managed PATH",
@@ -171,6 +176,7 @@ export async function repairPathRemote(host, installDir, onData = () => {}) {
 
 /** 本机：注册表用户 PATH 去重置顶 installDir（备份到 data/path-backups/） */
 export async function repairPathLocal(installDir, onData = () => {}) {
+  assertWindowsLocal("PATH 修复");
   const dir = installDir.trim() === "~" ? os.homedir()
     : installDir.startsWith("~/") || installDir.startsWith("~\\") ? path.join(os.homedir(), installDir.slice(2))
     : installDir;
