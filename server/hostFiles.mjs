@@ -132,7 +132,8 @@ try {
   try { [Console]::OpenStandardInput().CopyTo($stream) } finally { $stream.Dispose() }
   if ((Get-Item -LiteralPath $tmp).Length -ne ${size}) { throw '文件传输不完整，未替换目标文件' }
   if ([IO.File]::Exists($t)) {
-    $backup = ${backupSuffix ? `$t + ${pwshQuote(backupSuffix)}` : "$null"}
+    # PowerShell 会把 $null 转为空字符串；无备份替换必须传真正的 null。
+    $backup = ${backupSuffix ? `$t + ${pwshQuote(backupSuffix)}` : "[NullString]::Value"}
     [IO.File]::Replace($tmp, $t, $backup)
   } else { [IO.File]::Move($tmp, $t) }
 } finally {

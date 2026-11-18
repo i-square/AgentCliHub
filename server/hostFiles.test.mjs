@@ -118,4 +118,9 @@ test("Windows SSH 文件契约：目标机 HOME、二进制 stdin、原子替换
   assert.equal(payload.toString("utf8"), "文本\r\n");
   assert.doesNotMatch(script, /base64 -d|\$HOME\//);
   assert.equal(windowsPathExpr("~\\dir ' x"), "(Join-Path $HOME 'dir '' x')");
+
+  await api.writeTextAtomic(host, target, "无备份\r\n", { backupSuffix: "" });
+  const noBackupScript = calls.at(-1).script;
+  assert.match(noBackupScript, /\$backup = \[NullString\]::Value/);
+  assert.doesNotMatch(noBackupScript, /\$backup = \$null/);
 });
