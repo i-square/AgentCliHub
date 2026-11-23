@@ -154,10 +154,15 @@ export default function App() {
     }
   }, []);
 
+  // 版本目标来自 /api/hosts 的 effectiveTools；刷新版本缓存后必须同步重建主机数据，避免继续用旧目标判断。
+  const refreshVersionData = useCallback(async () => {
+    await loadVersions();
+    await refreshHosts();
+  }, [loadVersions, refreshHosts]);
+
   useEffect(() => {
-    refreshHosts();
     refreshTasks();
-    loadVersions();
+    refreshVersionData();
     const es = new EventSource("/api/events");
     es.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -179,7 +184,7 @@ export default function App() {
       }
     };
     return () => es.close();
-  }, [refreshHosts, refreshTasks, loadVersions]);
+  }, [refreshHosts, refreshTasks, refreshVersionData]);
 
   const taskList = useMemo(
     () => [...tasks.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 30),
@@ -282,7 +287,10 @@ export default function App() {
 
       {view === "hosts" && (
         <>
-      <VersionBar versions={versions} onRefresh={() => runAction(async () => { await api.refreshToolVersions(); await loadVersions(); })} />
+      <VersionBar versions={versions} onRefresh={() => runAction(async () => {
+        await api.refreshToolVersions();
+        await refreshVersionData();
+      })} />
       <div className="batchbar">
         <label className="select-all">
           <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={enabledHosts.length === 0} />
@@ -402,7 +410,7 @@ export default function App() {
         <SettingsModal
           config={data.config}
           versions={versions}
-          onVersionsChanged={loadVersions}
+          onVersionsChanged={refreshVersionData}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => {
             setSettingsOpen(false);
@@ -640,7 +648,7 @@ function Modal(props: { title: string; onClose: () => void; children: React.Reac
 function SettingsModal(props: {
   config: Config;
   versions: ToolVersionsResponse | null;
-  onVersionsChanged: () => void;
+  onVersionsChanged: () => void | Promise<void>;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -689,7 +697,7 @@ function SettingsModal(props: {
     setRefreshing(true);
     try {
       await api.refreshToolVersions();
-      props.onVersionsChanged();
+      await props.onVersionsChanged();
     } catch (e) {
       alert((e as Error).message);
     } finally {
