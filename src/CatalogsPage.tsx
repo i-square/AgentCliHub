@@ -51,6 +51,7 @@ function useEffectiveTheme(): "light" | "dark" {
 
 // 有官方拉取通道的厂商（对应 models.<key>.json）
 const OFFICIAL_VENDORS = ["glm", "kimi", "deepseek"] as const;
+type PullChannel = "official" | "ccswitch";
 
 // ----- 与 server/tools.mjs 的 catalogReadiness 保持一致的轻量副本（前端仅用于展示与禁用） -----
 function normalizePath(p: string, home: string, ci: boolean): string {
@@ -99,8 +100,8 @@ export default function CatalogsPage(props: {
   const [busy, setBusy] = useState("");
   const [newKey, setNewKey] = useState("");
   const [bandDrafts, setBandDrafts] = useState<Record<string, string>>({});
-  // 每个 catalog 文件的官方拉取状态：idle(不渲染标记) / pulling(转圈) / ok / fail
-  const [pullState, setPullState] = useState<Record<string, { phase: "pulling" | "ok" | "fail"; text: string }>>({});
+  // 每个 catalog 文件的拉取状态：idle(不渲染标记) / pulling(转圈) / ok / fail；channel 记录最近请求/成功通道
+  const [pullState, setPullState] = useState<Record<string, { phase: "pulling" | "ok" | "fail"; text: string; channel?: PullChannel }>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [restartAfter, setRestartAfter] = useState(true);
   const [pushBusy, setPushBusy] = useState(false);
@@ -247,8 +248,18 @@ export default function CatalogsPage(props: {
     });
 
   /** 官方源拉取（不弹窗）：行内图标转圈 → ✅/❌ 标记，明细放 title 提示 */
-  const runPull = <T,>(name: string, fn: () => Promise<T>, okText: (r: T) => string) => {
-    setPullState((prev) => ({ ...prev, [name]: { phase: "pulling", text: "" } }));
+  const resultChannel = (r: unknown): PullChannel | undefined =>
+    r && typeof r === "object" && "channel" in r && (r.channel === "official" || r.channel === "ccswitch")
+      ? r.channel
+      : undefined;
+
+  const runPull = <T,>(
+    name: string,
+    channel: PullChannel | undefined,
+    fn: () => Promise<T>,
+    okText: (r: T) => string
+  ) => {
+    setPullState((prev) => ({ ...prev, [name]: { ...prev[name], phase: "pulling", text: "", channel } }));
     (async () => {
       try {
         const r = await fn();
@@ -259,9 +270,9 @@ export default function CatalogsPage(props: {
           setContent(data.content);
           setSavedContent(data.content);
         }
-        setPullState((prev) => ({ ...prev, [name]: { phase: "ok", text: okText(r) } }));
+        setPullState((prev) => ({ ...prev, [name]: { phase: "ok", text: okText(r), channel: resultChannel(r) ?? channel } }));
       } catch (e) {
-        setPullState((prev) => ({ ...prev, [name]: { phase: "fail", text: (e as Error).message } }));
+        setPullState((prev) => ({ ...prev, [name]: { phase: "fail", text: (e as Error).message, channel } }));
       }
     })();
   };
@@ -270,6 +281,7 @@ export default function CatalogsPage(props: {
     const name = `models.${vendor}.json`;
     runPull(
       name,
+      "official",
       () => api.pullOfficial(name, "auto"),
       (r) => `${r.channel === "official" ? "官方" : "备用"} · ${r.models.join("、")}${r.note ? `（${r.note}）` : ""}`
     );
@@ -280,14 +292,21 @@ export default function CatalogsPage(props: {
     const name = `models.${vendor}.json`;
     runPull(
       name,
+      "ccswitch",
       () => api.pullOfficial(name, "ccswitch"),
       (r) => `备用 · ${r.models.join("、")}${r.note ? `（${r.note}）` : ""}`
     );
   };
 
+  /** 行内通道切换：备用 → 官方；官方/未知 → 备用 */
+  const pullToggle = (vendor: string, currentChannel?: PullChannel) => {
+    if (currentChannel === "ccswitch") pullOfficial(vendor);
+    else pullBackup(vendor);
+  };
+
   /** 一键拉取全部：OAI 官方 catalog + 三家厂商（官方优先，失败自动回落备用源） */
   const pullAll = () => {
-    void runPull("models.oai.json", () => api.refreshOai(), () => "已更新");
+    void runPull("models.oai.json", undefined, () => api.refreshOai(), () => "已更新");
     OFFICIAL_VENDORS.forEach((v) => pullOfficial(v));
   };
   const pullAllBusy = Object.values(pullState).some((s) => s.phase === "pulling");
@@ -473,7 +492,7 @@ export default function CatalogsPage(props: {
                 const st = pullState[f.name];
                 const vendor = OFFICIAL_VENDORS.find((v) => v === f.key);
                 const isVendorFile = vendor !== undefined;
-                const pullIcon = !st || st.phase === "pulling" ? "🔄" : st.phase === "ok" ? "✅" : "❌";
+                const nextIsOfficial = st?.channel === "ccswitch";
                 return (
 
                   <tr key={f.name} className={f.name === activeName ? "active" : ""}>
@@ -495,28 +514,18 @@ export default function CatalogsPage(props: {
                             <button
                               className={`icon-pull ${st?.phase === "pulling" ? "spinning" : ""}`}
                               title={
-                                st?.phase === "fail"
-                                  ? `拉取失败：${st.text}`
-                                  : st?.phase === "ok"
-                                    ? `拉取成功：${st.text}`
-                                    : `从官方源拉取并覆盖 ${f.name}（未配置 API Key 时自动回落 CC Switch 社区源）`
+                                nextIsOfficial
+                                  ? `切换回官方源拉取并覆盖 ${f.name}（未配置 API Key 时自动回落 CC Switch 社区源）`
+                                  : `切换到备用通道：从 CC Switch 社区预设源拉取并覆盖（人工维护、可能滞后于官方）`
                               }
                               disabled={st?.phase === "pulling"}
-                              onClick={() => pullOfficial(f.key)}
+                              onClick={() => pullToggle(f.key, st?.channel)}
                             >
-                              {pullIcon}
-                            </button>
-                            <button
-                              className={`icon-pull ${st?.phase === "pulling" ? "spinning" : ""}`}
-                              title="备用通道：从 CC Switch 社区预设源拉取并覆盖（人工维护、可能滞后于官方）"
-                              disabled={st?.phase === "pulling"}
-                              onClick={() => pullBackup(f.key)}
-                            >
-                              🔀
+                              {nextIsOfficial ? "🔄" : "🔀"}
                             </button>
                             {st && st.phase !== "pulling" && (
                               <span className={`pull-note ${st.phase}`} title={st.text}>
-                                {st.phase === "ok" ? st.text.split(" · ")[0] : "失败"}
+                                {st.phase === "ok" ? (st.channel === "ccswitch" ? "备用" : "官方") : "失败"}
                               </span>
                             )}
                           </span>
